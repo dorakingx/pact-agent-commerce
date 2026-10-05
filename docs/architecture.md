@@ -90,12 +90,14 @@ flowchart TB
 | Negotiation rules | `src/lib/domain/negotiation.ts` | Turn order, move limit, clamps and vetoes (buyer can never agree above budget; seller never below floor) |
 | Contract engine | `src/lib/domain/contract.ts` | Compiles agreed terms into a strict, hashed, machine-readable contract and derives its verification rules |
 | Policy engine | `src/lib/domain/policy.ts` | Per-transaction maximum, autonomous limit, daily limit, allowed categories, new-seller approval |
-| Payment orchestrator | `src/lib/payments/orchestrator.ts` | The only code that calls PayPal: create order (intent `AUTHORIZE`), authorize, capture, void, reconcile |
+| Payment orchestrator | `src/lib/payments/orchestrator.ts` | The only code that moves money at PayPal: create order (intent `AUTHORIZE`), authorize, capture, void |
 | PayPal client | `src/lib/payments/paypal-client.ts` | Raw REST with OAuth, `PayPal-Request-Id` idempotency, `debug_id` capture, safe retries, webhook signature verification |
 | Verifier | `src/lib/domain/verification.ts`, `src/lib/ai/verifier.ts` | Deterministic checks (counts, real aspect ratios, word counts, deadline, format, hidden-instruction scan) plus AI-judged rules, each with result, evidence and confidence |
 | Capture guard | `src/lib/domain/settlement.ts` | The last check before money moves: status, contract hash, report, amounts, expiry, human release |
 | Audit chain | `src/lib/domain/audit.ts` | Append-only, hash-chained event log in plain language |
 | Step engine | `src/lib/services/deals.ts` | Executes one lifecycle step per request under a per-deal lease; the only writer of deal status |
+| Auditor agent | `src/lib/ai/auditor.ts`, `src/lib/services/auditor.ts` | Re-reads PayPal's record through the PayPal Agent Toolkit (`get_order`, read-only) and reconciles it with PACT's ledger, field by field |
+| Operations read model | `src/lib/services/operations.ts` | One row per deal, payment event and verification check for the operations dashboard |
 
 ## The contract is bound to the payment
 
@@ -143,6 +145,7 @@ stateDiagram-v2
     awaiting_approval --> declined
     payment_pending --> awaiting_payment: interactive approval
     payment_pending --> authorized: delegated wallet
+    payment_pending --> blocked: daily limit reached meanwhile
     awaiting_payment --> authorized
     awaiting_payment --> cancelled
     authorized --> submitted
@@ -160,6 +163,11 @@ stateDiagram-v2
     rejected --> [*]
 ```
 
+Two more terminal states are reachable from wherever funds are (or are about to be) held, and are
+left out of the diagram for legibility: `expired` — PayPal released or expired the authorization
+before settlement — and `failed` — PayPal refused an operation for good. `src/lib/domain/status.ts`
+is the authoritative table.
+
 Payments have their own machine: `none → created → approved → authorized → captured | voided | expired | failed`.
 
 ## How a step executes
@@ -173,10 +181,14 @@ one** step:
 3. Do the external work for this step (a model call or a PayPal call).
 4. Persist the result, the audit events and the status change in one transaction.
 
-PayPal calls carry a deterministic `PayPal-Request-Id` and are recorded in an idempotency ledger
-(`payment_operations`). If the process dies after PayPal accepted a capture but before PACT wrote
-it down, the next attempt replays the same key and adopts the existing capture instead of
-creating a second one.
+The order step does one thing more before it calls PayPal: under a per-owner lock it re-checks the
+daily limit against everything already committed today and records the payment as a reservation,
+so two deals running at once cannot both squeeze under the limit.
+
+Every money-moving PayPal call (create order, authorize, capture, void) carries a deterministic
+`PayPal-Request-Id` and is recorded in an idempotency ledger (`payment_operations`). If the process
+dies after PayPal accepted a capture but before PACT wrote it down, the next attempt replays the
+same key and adopts the existing capture instead of creating a second one.
 
 ## Verification
 
@@ -227,6 +239,8 @@ needs no external services.
 | `audit_events` | Hash-chained audit trail |
 | `policies`, `wallets` | Spending policy and delegated wallet per session |
 | `webhook_events` | Verified PayPal webhooks, deduplicated on event id |
+| `rate_limits` | Fixed-window counters that protect the public demo |
+| `simulated_orders` | State of the payment simulator (keyless development and CI only) |
 
 ## Degraded modes
 
@@ -234,5 +248,5 @@ needs no external services.
 |---|---|
 | Model slow or unavailable during negotiation or delivery | Hard timeout, gateway fallback to a second model, then a scripted agent. The deal is labelled as degraded. |
 | Model unavailable during verification | AI rules become `uncertain` → human review. Never auto-capture. |
-| PayPal 5xx / timeout | Retried with the same idempotency key; the step stays where it is and can be retried. |
+| PayPal 5xx / timeout | Retried with the same idempotency key; the step stays where it is and can be retried, up to four attempts per operation. After that an order or void ends the deal as failed; a capture whose outcome is unknown is only written off if the hold can be voided, so a deal is never marked failed while its payment went through. |
 | No PayPal credentials (keyless local dev, CI) | A simulator stands in for PayPal and every payment is labelled "simulated". |

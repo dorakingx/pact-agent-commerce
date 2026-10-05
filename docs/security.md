@@ -16,9 +16,14 @@ payments application: the controls below are implemented and tested, not aspirat
 | PayPal | The record of orders, authorizations and captures | — |
 | Incoming webhooks | Nothing until the signature verifies | |
 
-The core principle: **an LLM never holds a capability that moves money.** Models receive no
-PayPal tool, no database handle and no way to set a status. They return data; schemas reject
-malformed data; engines clamp, veto or escalate the rest.
+The core principle: **an LLM never holds a capability that moves money.** The negotiating,
+producing and verifying agents receive no PayPal tool, no database handle and no way to set a
+status. They return data; schemas reject malformed data; engines clamp, veto or escalate the rest.
+
+One agent does touch PayPal: the auditor. It is given exactly one tool from the PayPal Agent
+Toolkit — `get_order`, read-only, pinned in code to the deal's own order — and its text is shown
+next to a deterministic field-by-field comparison that decides the reconciliation result. The
+toolkit has no authorize, capture-authorization or void tool at all.
 
 ## Threats and controls
 
@@ -105,14 +110,17 @@ itself (claims a 1:1 file that is not 1:1).
 - Unverified events change nothing.
 - A verified event still has to match the ids and amounts PACT already holds; mismatches are logged
   to the audit trail and ignored.
-- Webhooks confirm state. Capture is initiated only by the orchestrator, after the guard passes.
+- Webhooks confirm what PayPal did and can close a deal accordingly (for example, when PayPal
+  releases an authorization the deal expires). They never initiate a capture: that happens only in
+  the orchestrator, after the guard passes.
 
 ### 7. Secret leakage
 
 *Controls.*
 - PayPal credentials, the session secret and the vault token exist only in server environment
   variables or server-side tables; modules that read them import `server-only`.
-- No `NEXT_PUBLIC_` variable carries a secret. `.env*` is git-ignored; `.env.example` lists names only.
+- No `NEXT_PUBLIC_` variable carries a secret. `.env*` is git-ignored; `.env.example` lists names
+  and non-secret defaults only.
 - Logs are structured and pass through a redactor that masks authorization headers, tokens, secrets
   and vault ids. Payer e-mail addresses are masked before they are stored.
 - The health endpoint reports whether integrations are configured, never their values.
@@ -126,11 +134,15 @@ another site.
 *Controls.*
 - Each browser gets a signed, http-only, same-site session cookie. Only the session that created a
   deal can advance it or decide on it; seeded showcase deals are read-only.
-- State-changing requests must be same-origin (Origin / Fetch-Metadata check) and JSON.
+- State-changing API requests from a browser must be same-origin (Origin / Fetch-Metadata check)
+  and JSON. The exceptions are deliberate: the PayPal return redirects (plain `GET`s that never
+  trust their query string — the order is re-read from PayPal and the stored order id is the
+  authority) and the webhook (authenticated by signature instead).
 - A human decision is only accepted at the gate it belongs to, and a human cannot release a
   delivery that explicitly failed verification.
 - Request bodies are size-limited and schema-validated; creation and decision endpoints are rate-limited.
-- Operator actions (connecting the shared demo wallet, seeding) require a separate admin token.
+- Connecting or disconnecting the shared demo wallet requires a separate operator token. Seeding
+  showcase deals is a command-line script with no HTTP surface.
 
 ## Spending controls
 
@@ -140,7 +152,7 @@ Deterministic, outside the model, evaluated before any PayPal call:
 - maximum total per day (block)
 - allowed work categories; restricted categories are always blocked
 - autonomous limit — above it, the deal pauses for human approval
-- first transaction with a new seller requires approval
+- deals with a seller that has no settled history ("new") require approval
 
 ## Residual risks and honest limits
 
