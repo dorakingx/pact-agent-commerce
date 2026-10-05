@@ -120,7 +120,7 @@ export const ProposedMoveSchema = z.object({
 export type ProposedMove = z.infer<typeof ProposedMoveSchema>;
 
 export const GuardrailNoteSchema = z.object({
-  /** Machine code, e.g. "price_above_budget", "price_below_floor", "accept_converted_to_counter". */
+  /** Machine code, e.g. "price_above_budget", "price_below_floor", "accept_vetoed" (full list: GUARDRAIL_CODES in ./negotiation.ts). */
   code: z.string(),
   /** Plain-language explanation shown in the UI. */
   detail: z.string(),
@@ -305,7 +305,12 @@ export type PolicyOutcome = z.infer<typeof PolicyOutcomeSchema>;
 export const PolicyEvaluationSchema = z.object({
   outcome: PolicyOutcomeSchema,
   checks: z.array(PolicyCheckSchema),
-  spentTodayMinor: MinorSchema,
+  /**
+   * Total already authorized today. Deliberately NOT capped at the per-transaction ceiling: it is a
+   * sum over deals, and it can legitimately exceed any single limit (a lowered daily limit, or
+   * two deals that cleared policy at the same moment).
+   */
+  spentTodayMinor: z.number().int().min(0),
   evaluatedAt: IsoDateTimeSchema,
 });
 export type PolicyEvaluation = z.infer<typeof PolicyEvaluationSchema>;
@@ -483,6 +488,7 @@ export const AUDIT_EVENT_TYPES = [
   "payment.approved",
   "payment.authorized",
   "payment.capture_blocked",
+  "payment.capture_pending",
   "payment.captured",
   "payment.voided",
   "payment.cancelled",
