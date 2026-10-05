@@ -276,3 +276,47 @@ export interface ApiErrorBody {
     details?: unknown;
   };
 }
+
+/** Delegated agent wallet status. The vault id itself is never sent to the browser. */
+export interface WalletStatus {
+  provider: ProviderKind;
+  /** False when the active provider cannot vault (then only interactive approval is possible). */
+  supportsVault: boolean;
+  /** Wallet connected by this browser session. */
+  session: { connected: boolean; pending: boolean; payerEmailMasked: string | null };
+  /** Shared, operator-connected sandbox wallet used by the public demo. */
+  demo: { connected: boolean };
+  /** How the next in-policy deal of this session will be approved. */
+  effectiveMode: ApprovalMode;
+}
+
+export interface ReconciliationFact {
+  /** e.g. "Order status", "Authorized amount", "Contract binding (custom_id)". */
+  field: string;
+  pact: string | null;
+  paypal: string | null;
+  match: boolean;
+}
+
+/** Result of independently re-reading PayPal's record of a deal and comparing it with PACT's ledger. */
+export interface ReconciliationView {
+  dealId: string;
+  status: "match" | "mismatch" | "unavailable";
+  checkedAt: string;
+  /** Deterministic, field-by-field comparison. This is the source of truth for `status`. */
+  facts: ReconciliationFact[];
+  /** Plain-language statement written by the auditor agent. Null when the agent did not run. */
+  narrative: string | null;
+  /** Read-only PayPal Agent Toolkit tools the auditor agent called, in order. */
+  toolCalls: { tool: string; ok: boolean }[];
+  source: "ai" | "deterministic";
+  model: string | null;
+  note: string | null;
+}
+
+export interface DealListResponse {
+  deals: DealSummary[];
+}
+export interface DealResponse {
+  deal: DealView;
+}
