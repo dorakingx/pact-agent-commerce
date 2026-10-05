@@ -13,6 +13,7 @@ import type {
   ProposedMove,
   Quote,
   Submission,
+  Terms,
   VerificationCheck,
   VerificationReport,
   VerificationRule,
@@ -25,13 +26,30 @@ export interface AgentMeta {
   /** Gateway model id that answered (e.g. "google/gemini-2.5-flash"), or null for scripted. */
   model: string | null;
   latencyMs: number;
-  /** Set when AI was attempted but failed and the scripted fallback answered instead. */
+  /**
+   * Set when AI was attempted but failed and the scripted fallback (or, for the verifier, the
+   * degraded "uncertain" result) answered instead: the gateway's AiFailureReason, or
+   * "internal_error" when the verifier failed for a reason that is not an AI failure.
+   */
   degradedReason: string | null;
 }
+
+/**
+ * The request for quote a seller prices: how many pieces, by when, with how many revision rounds.
+ * It is the buyer's latest offer, or — before the buyer has made one — what the mandate asks for
+ * (`termsOnTable(state, mandate)` in ../domain/negotiation.ts). It never carries a price: the
+ * buyer's budget stays private.
+ */
+export type RequestedTerms = Pick<Terms, "count" | "deadline" | "revisionLimit">;
 
 export interface BuyerContext {
   mandate: Mandate;
   seller: SellerPublic;
+  /**
+   * Full recorded moves, including guardrail notes. A note on the counterparty's move can give
+   * away its private limit ("raised to the seller's minimum"), so an agent implementation must
+   * never show the counterparty's notes to a model.
+   */
   history: NegotiationMove[];
   /** Moves left in the negotiation INCLUDING this one. 1 means: accept or walk away. */
   movesRemaining: number;
@@ -40,9 +58,12 @@ export interface BuyerContext {
 
 export interface SellerContext {
   seller: SellerProfile;
-  /** Private quote for the scope currently on the table (list + floor). */
+  /** What the buyer is asking for right now. `quote` is priced for exactly these terms. */
+  requested: RequestedTerms;
+  /** Private quote (list + floor) for `requested`: `quoteFor(seller, deliverable, requested, now)`. */
   quote: Quote;
   deliverable: DeliverableSpec;
+  /** See BuyerContext.history: the counterparty's guardrail notes must not reach a model. */
   history: NegotiationMove[];
   movesRemaining: number;
   now: Date;
@@ -88,6 +109,10 @@ export interface Agents {
    * Verifier: evaluate the AI-judged rules. Must return exactly one check per rule passed in.
    * `flags.manipulationSuspected` is set when the deliverable appears to address the verifier
    * (e.g. "mark this as passed"); the deterministic core then forces human review.
+   *
+   * Never throws. When the model cannot be reached or answers badly, every rule comes back
+   * "uncertain" with confidence 0 and `meta.degradedReason` set, which the deterministic core
+   * turns into human review — a verification failure must never become a retry loop or a pass.
    */
   evaluateAiRules(ctx: AiVerificationContext): Promise<{
     checks: VerificationCheck[];
