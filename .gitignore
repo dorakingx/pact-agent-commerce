@@ -52,3 +52,7 @@ next-env.d.ts
 
 # scratch media (final assets live in artifacts/devpost)
 /artifacts/tmp/
+.env*.local
+
+# private working notes (research briefs, scratch)
+/.notes/
