@@ -22,11 +22,27 @@ function errorBody(code: string, message: string, requestId: string, details?: u
   return { error: { code, message, requestId, ...(details === undefined ? {} : { details }) } };
 }
 
+/**
+ * Seconds until a rate-limit window reopens, for the Retry-After header of a 429 — so a client
+ * (or a proxy) backs off for as long as the limit actually lasts instead of guessing.
+ */
+function retryAfterSeconds(error: ApiError): string | null {
+  if (error.status !== 429 || typeof error.details !== "object" || error.details === null) return null;
+  const resetAt: unknown = (error.details as { resetAt?: unknown }).resetAt;
+  const resetMs = typeof resetAt === "string" ? Date.parse(resetAt) : Number.NaN;
+  if (Number.isNaN(resetMs)) return null;
+  return String(Math.max(1, Math.ceil((resetMs - Date.now()) / 1000)));
+}
+
 /** Convert any thrown value into the API's error response. Internal details are logged, never returned. */
 export function errorResponse(error: unknown, requestId: string, routeName: string): Response {
   if (error instanceof ApiError) {
     if (error.status >= 500) log.error("api.error", { requestId, route: routeName, code: error.code, error });
-    return json(errorBody(error.code, error.message, requestId, error.details), { status: error.status });
+    const retryAfter = retryAfterSeconds(error);
+    return json(errorBody(error.code, error.message, requestId, error.details), {
+      status: error.status,
+      ...(retryAfter === null ? {} : { headers: { "Retry-After": retryAfter } }),
+    });
   }
   if (error instanceof ZodError) {
     const issues = error.issues.slice(0, 8).map((i) => ({ path: i.path.join("."), message: i.message }));

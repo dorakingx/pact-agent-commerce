@@ -1,0 +1,4188 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "PACT — Programmable Agent Commerce Trust",
+    "version": "0.1.0",
+    "summary": "Contract-aware, fulfillment-gated PayPal settlement for agent-to-agent commerce.",
+    "description": "A buyer agent and a seller agent negotiate; PACT compiles a hashed contract, checks a deterministic spending policy, places a PayPal authorization, verifies the delivery and captures only if the contract is satisfied.\n\nRules that hold for every endpoint:\n\n- The browser never supplies an amount, a status, a seller or a contract. Amounts come from the signed contract on the server.\n- Identity is an anonymous session in a signed, http-only cookie. Only the session that created a deal may change it; showcase deals are read-only.\n- State-changing requests must be same-origin and, where they have a body, JSON.\n- Money is integer minor units (US cents). Timestamps are ISO-8601 UTC.\n- Every response carries `Cache-Control: no-store` and an `x-request-id`.\n- PACT runs against PayPal Sandbox only. Without credentials a simulator stands in and every payment is labelled `simulated`.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "/",
+      "description": "This deployment"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Deals",
+      "description": "Create a deal, drive it one step at a time, decide at human gates."
+    },
+    {
+      "name": "Operations",
+      "description": "The operations ledger and reconciliation against the payment provider."
+    },
+    {
+      "name": "Policy",
+      "description": "The deterministic spending policy of a session."
+    },
+    {
+      "name": "Wallet",
+      "description": "The delegated agent wallet (PayPal Vault)."
+    },
+    {
+      "name": "PayPal",
+      "description": "Redirect targets and webhooks called by PayPal."
+    },
+    {
+      "name": "Simulator",
+      "description": "Stand-in for PayPal's approval page when no credentials are configured."
+    },
+    {
+      "name": "System",
+      "description": "Deployment status."
+    }
+  ],
+  "security": [
+    {
+      "session": []
+    },
+    {}
+  ],
+  "paths": {
+    "/api/deals": {
+      "post": {
+        "operationId": "createDeal",
+        "tags": [
+          "Deals"
+        ],
+        "summary": "Create a deal from a request in words",
+        "description": "Derives the mandate, matches a seller agent and starts the negotiation. Creates the anonymous session if there is none. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 8 per session per 10 minutes, 40 per network address per hour.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDealRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "The new deal.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "get": {
+        "operationId": "listDeals",
+        "tags": [
+          "Deals"
+        ],
+        "summary": "List the calling session's deals",
+        "description": "Newest first. An empty list without a session; never creates one.",
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The session's deals.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealListResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/deals/{id}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^deal_[a-z0-9]{8,32}$"
+          },
+          "description": "Deal id."
+        }
+      ],
+      "get": {
+        "operationId": "getDeal",
+        "tags": [
+          "Deals"
+        ],
+        "summary": "Read a deal",
+        "description": "Readable by anyone holding the id (ids are unguessable; showcase deals are public). The buyer's private mandate is included only for the owning session.",
+        "responses": {
+          "200": {
+            "description": "The deal as the caller may see it.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/deals/{id}/advance": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^deal_[a-z0-9]{8,32}$"
+          },
+          "description": "Deal id."
+        }
+      ],
+      "post": {
+        "operationId": "advanceDeal",
+        "tags": [
+          "Deals"
+        ],
+        "summary": "Execute at most one automatic step",
+        "description": "Owner only. The deal's stored status decides which step runs; the caller cannot choose it. Runs under a per-deal lease: a concurrent call answers 200 with `busy: true`. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "An empty JSON object."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The deal after the step, or unchanged when nothing ran.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AdvanceResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          },
+          "502": {
+            "$ref": "#/components/responses/PaymentError"
+          }
+        }
+      }
+    },
+    "/api/deals/{id}/decision": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^deal_[a-z0-9]{8,32}$"
+          },
+          "description": "Deal id."
+        }
+      ],
+      "post": {
+        "operationId": "decideDeal",
+        "tags": [
+          "Deals"
+        ],
+        "summary": "Record a human decision at a gate",
+        "description": "Owner only. The decision must be one the deal's current gate offers (`next.options`), otherwise 409. The body never carries an amount or a status; a release still has to pass the settlement guard before any money moves. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The deal after the decision.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DealResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          },
+          "502": {
+            "$ref": "#/components/responses/PaymentError"
+          }
+        }
+      }
+    },
+    "/api/deals/{id}/artifacts/{artifactId}": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^deal_[a-z0-9]{8,32}$"
+          },
+          "description": "Deal id."
+        },
+        {
+          "name": "artifactId",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "operationId": "downloadArtifact",
+        "tags": [
+          "Deals"
+        ],
+        "summary": "Download one deliverable",
+        "description": "Seller-supplied content, served as an attachment under a sandboxing content security policy with MIME sniffing off.",
+        "responses": {
+          "200": {
+            "description": "The file.",
+            "headers": {
+              "Content-Disposition": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "Always `attachment`."
+              },
+              "Content-Security-Policy": {
+                "schema": {
+                  "const": "default-src 'none'; style-src 'unsafe-inline'; sandbox"
+                }
+              },
+              "X-Content-Type-Options": {
+                "schema": {
+                  "const": "nosniff"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            },
+            "content": {
+              "image/svg+xml": {
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/deals/{id}/reconcile": {
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "pattern": "^deal_[a-z0-9]{8,32}$"
+          },
+          "description": "Deal id."
+        }
+      ],
+      "post": {
+        "operationId": "reconcileDeal",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Compare PACT's ledger with the provider's record of the deal",
+        "description": "Re-reads the order and authorization from the payment provider and compares them field by field with PACT's ledger. The verdict is deterministic. With PayPal Sandbox and AI enabled, a read-only auditor agent (PayPal Agent Toolkit, `get_order` only) adds a short statement; if it fails, the facts are returned alone. Changes no payment and no status. Anyone who can read the deal may call it; only the owner's call is written to the audit trail (`payment.reconciled`). State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limit: 12 per session (or network address) per 10 minutes.",
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "An empty JSON object."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The comparison. A provider failure is reported as `status: unavailable`, not as an error.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReconciliationView"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/operations": {
+      "get": {
+        "operationId": "getOperationsSnapshot",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "The operations ledger",
+        "description": "The calling session's deals plus the seeded showcase deals (newest first, at most 300), their payment events, verification checks and totals. Without a session only the showcase is returned. Read-only.",
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The snapshot.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OpsSnapshot"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/policy": {
+      "get": {
+        "operationId": "getPolicy",
+        "tags": [
+          "Policy"
+        ],
+        "summary": "Read the session's spending policy",
+        "description": "The default policy until one is saved. Never creates a session.",
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy and today's committed spend.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "put": {
+        "operationId": "updatePolicy",
+        "tags": [
+          "Policy"
+        ],
+        "summary": "Replace the session's spending policy",
+        "description": "Applies to this session only and only to what happens next: a signed contract keeps the thresholds it was signed with. Creates the session if there is none. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limit: 30 per session per 10 minutes.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Policy"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The saved policy.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PolicyResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/wallet": {
+      "get": {
+        "operationId": "getWalletStatus",
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Delegated wallet status",
+        "description": "Whether the session's wallet and the shared demo wallet are connected, and how the next in-policy deal will be approved. Never creates a session.",
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The status.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletStatus"
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "disconnectWallet",
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Disconnect a wallet",
+        "description": "Scope `session` forgets the caller's wallet (a no-op without a session). Scope `demo` forgets the shared wallet and requires the operator token. Existing authorizations are unaffected. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked).",
+        "security": [
+          {
+            "session": []
+          },
+          {
+            "adminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WalletScope"
+            }
+          },
+          {
+            "name": "x-admin-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Operator token. Required for scope `demo`."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The status after disconnecting.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/wallet/connect": {
+      "post": {
+        "operationId": "connectWallet",
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Start connecting a delegated wallet",
+        "description": "Asks the provider for a vault setup token, stores it server-side as a pending connection and returns where the payer gives consent. Creates the session if there is none. Scope `demo` requires the operator token and binds the connection to the calling session. A connected wallet must be disconnected before another is connected (409). State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 10 per session per 10 minutes; 20 attempts on scope `demo` per network address per 10 minutes.",
+        "security": [
+          {},
+          {
+            "adminToken": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "x-admin-token",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Operator token. Required for scope `demo`."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WalletConnectRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Where to send the payer.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WalletConnectResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          },
+          "502": {
+            "$ref": "#/components/responses/PaymentError"
+          }
+        }
+      }
+    },
+    "/api/health": {
+      "get": {
+        "operationId": "getHealth",
+        "tags": [
+          "System"
+        ],
+        "summary": "What is configured in this deployment",
+        "description": "Reports that integrations are configured, never their values. Answers 200 even when the database is unreachable; the affected components are then listed under `degraded`.",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The status.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SystemStatus"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/webhooks/paypal": {
+      "post": {
+        "operationId": "receivePayPalWebhook",
+        "tags": [
+          "PayPal"
+        ],
+        "summary": "PayPal event notifications",
+        "description": "Called by PayPal, cross-origin and without a session. The signature is verified over the exact bytes of the body; an event that does not verify changes nothing. Verified events are de-duplicated on PayPal's event id and may only confirm or advance a payment along its state machine.",
+        "security": [
+          {}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "A PayPal webhook event, at most 256 KiB.",
+                "additionalProperties": true
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Verified and applied, or needing no action.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookAck"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not verified, not a usable event, or too large. Empty body."
+          },
+          "503": {
+            "description": "The deal is in the middle of a step; PayPal redelivers. Empty body.",
+            "headers": {
+              "Retry-After": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/paypal/return": {
+      "get": {
+        "operationId": "payPalReturn",
+        "tags": [
+          "PayPal"
+        ],
+        "summary": "Return from the PayPal approval page",
+        "description": "Browser redirect target. Nothing in the URL is trusted: the order authorized is the one stored for the deal, re-read from PayPal (status, amount, contract hash) before authorizing.",
+        "security": [
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "deal",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "PayPal's order id. Must equal the deal's stored order id."
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Back to the deal page.",
+            "headers": {
+              "Location": {
+                "description": "`/deals/{id}?paypal=approved|pending|error`, or `/workspace?paypal=error` for a malformed deal id.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/paypal/cancel": {
+      "get": {
+        "operationId": "payPalCancel",
+        "tags": [
+          "PayPal"
+        ],
+        "summary": "Return from a cancelled PayPal approval",
+        "description": "Browser redirect target. Changes nothing: the deal keeps waiting for payment until its owner cancels it.",
+        "security": [
+          {}
+        ],
+        "parameters": [
+          {
+            "name": "deal",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Back to the deal page.",
+            "headers": {
+              "Location": {
+                "description": "`/deals/{id}?paypal=cancelled` or `/workspace?paypal=cancelled`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/paypal/vault-return": {
+      "get": {
+        "operationId": "payPalVaultReturn",
+        "tags": [
+          "Wallet"
+        ],
+        "summary": "Return from the wallet consent",
+        "description": "Browser redirect target. Exchanges the setup token stored for the pending connection — never a token from the URL — for the vault token and marks the wallet connected. For scope `demo` the returning browser must be the operator session that started the connection.",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/WalletScope"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Back to the policies page.",
+            "headers": {
+              "Location": {
+                "description": "`/policies?wallet=connected` or `/policies?wallet=error`.",
+                "schema": {
+                  "type": "string"
+                }
+              },
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/simulated/approve": {
+      "post": {
+        "operationId": "approveSimulatedOrder",
+        "tags": [
+          "Simulator"
+        ],
+        "summary": "Approve a simulated order as the payer",
+        "description": "The simulated payer approves; PACT then authorizes exactly as after a real PayPal return. Exists only while the simulator stands in for PayPal: with PayPal Sandbox credentials configured it answers 404. Owner only. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatedOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "What the authorization attempt achieved.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulatedApprovalResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/simulated/cancel": {
+      "post": {
+        "operationId": "cancelSimulatedOrder",
+        "tags": [
+          "Simulator"
+        ],
+        "summary": "Cancel a simulated order as the payer",
+        "description": "The simulator voids the order and the deal is cancelled with it, recorded as the owner's decision. Exists only while the simulator stands in for PayPal: with PayPal Sandbox credentials configured it answers 404. Owner only. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked).",
+        "security": [
+          {
+            "session": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SimulatedOrderRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The deal was cancelled.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SimulatedCancelResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "pact_sid",
+        "description": "Anonymous session: `<id>.<HMAC-SHA256>`; http-only, SameSite=Lax. Set by the endpoints that may start a session."
+      },
+      "adminToken": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "x-admin-token",
+        "description": "Operator token for the shared demo wallet. Compared in constant time; rejected when none is configured."
+      }
+    },
+    "responses": {
+      "InvalidRequest": {
+        "description": "The request is malformed: not JSON, too large, or failing validation (`invalid_request`).",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "Cross-site request, missing session, not the deal's owner, or missing operator token (`forbidden`).",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "Unknown resource (`not_found`).",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The action is not possible in the current state (`conflict`).",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "RateLimited": {
+        "description": "Too many requests (`rate_limited`); `details.resetAt` says when the window ends and `Retry-After` how many seconds that is from now.",
+        "headers": {
+          "Retry-After": {
+            "schema": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "description": "Seconds until the rate-limit window reopens."
+          },
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "PaymentError": {
+        "description": "The payment provider could not complete the step (`payment_error`); `details` carries the provider's issue code and debug id.",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "Internal": {
+        "description": "Unexpected failure (`internal`). Details are logged under the request id, never returned.",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Minor": {
+        "type": "integer",
+        "minimum": 0,
+        "description": "Money in integer minor units (US cents). Never a float."
+      },
+      "IsoDateTime": {
+        "type": "string",
+        "format": "date-time",
+        "description": "ISO-8601 timestamp, UTC."
+      },
+      "Category": {
+        "type": "string",
+        "enum": [
+          "illustration",
+          "copywriting",
+          "translation",
+          "other",
+          "restricted"
+        ],
+        "description": "Kind of work. `other` has no seller; `restricted` is always blocked by policy."
+      },
+      "AspectRatio": {
+        "type": "string",
+        "enum": [
+          "16:9",
+          "1:1",
+          "4:3",
+          "3:2",
+          "4:5",
+          "9:16"
+        ]
+      },
+      "Language": {
+        "type": "string",
+        "enum": [
+          "en",
+          "ja",
+          "es",
+          "fr",
+          "de"
+        ]
+      },
+      "DealStatus": {
+        "type": "string",
+        "enum": [
+          "negotiating",
+          "agreed",
+          "contracted",
+          "awaiting_approval",
+          "payment_pending",
+          "awaiting_payment",
+          "authorized",
+          "submitted",
+          "revision_required",
+          "in_review",
+          "verified",
+          "rejecting",
+          "completed",
+          "rejected",
+          "declined",
+          "blocked",
+          "negotiation_failed",
+          "cancelled",
+          "expired",
+          "failed"
+        ],
+        "description": "Deal lifecycle state. Transitions are table-driven; the last eight values are terminal."
+      },
+      "PaymentStatus": {
+        "type": "string",
+        "enum": [
+          "none",
+          "created",
+          "approved",
+          "authorized",
+          "captured",
+          "voided",
+          "expired",
+          "failed"
+        ],
+        "description": "Payment lifecycle state: none → created → approved → authorized → captured | voided | expired | failed."
+      },
+      "ProviderKind": {
+        "type": "string",
+        "enum": [
+          "paypal_sandbox",
+          "simulated"
+        ],
+        "description": "`simulated` is the labelled stand-in used only when no PayPal Sandbox credentials are configured."
+      },
+      "ApprovalMode": {
+        "type": "string",
+        "enum": [
+          "interactive",
+          "delegated"
+        ],
+        "description": "How the payer consented: in PayPal for this order, or once through a delegated (vaulted) agent wallet."
+      },
+      "HumanDecisionKind": {
+        "type": "string",
+        "enum": [
+          "approve_spend",
+          "decline_spend",
+          "release_payment",
+          "release_partial",
+          "request_revision",
+          "reject_delivery",
+          "cancel_payment"
+        ]
+      },
+      "VerificationDecision": {
+        "type": "string",
+        "enum": [
+          "capture_eligible",
+          "human_review",
+          "revision_required",
+          "reject"
+        ]
+      },
+      "PolicyOutcome": {
+        "type": "string",
+        "enum": [
+          "allow",
+          "needs_approval",
+          "block"
+        ]
+      },
+      "StepKind": {
+        "type": "string",
+        "enum": [
+          "negotiate",
+          "contract",
+          "policy",
+          "order",
+          "fulfill",
+          "verify",
+          "capture",
+          "void"
+        ],
+        "description": "An automatic step of the engine. One call to /advance executes at most one."
+      },
+      "RiskLevel": {
+        "type": "string",
+        "enum": [
+          "low",
+          "medium",
+          "high"
+        ]
+      },
+      "IllustrationSpec": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "illustration"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 6
+          },
+          "aspectRatios": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AspectRatio"
+            },
+            "minItems": 1,
+            "maxItems": 3
+          },
+          "subject": {
+            "type": "string"
+          },
+          "style": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "count",
+          "aspectRatios",
+          "subject",
+          "style"
+        ]
+      },
+      "CopySpec": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "const": "copy"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          },
+          "languages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Language"
+            },
+            "minItems": 1,
+            "maxItems": 3
+          },
+          "minWords": {
+            "type": "integer"
+          },
+          "maxWords": {
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "tone": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "kind",
+          "count",
+          "languages",
+          "minWords",
+          "maxWords",
+          "subject",
+          "tone"
+        ]
+      },
+      "DeliverableSpec": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/IllustrationSpec"
+          },
+          {
+            "$ref": "#/components/schemas/CopySpec"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind"
+        }
+      },
+      "Mandate": {
+        "type": "object",
+        "properties": {
+          "summary": {
+            "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/Category"
+          },
+          "deliverable": {
+            "$ref": "#/components/schemas/DeliverableSpec"
+          },
+          "minCount": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "budgetMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "revisionsWanted": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "minRevisions": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 5
+          }
+        },
+        "required": [
+          "summary",
+          "category",
+          "deliverable",
+          "minCount",
+          "budgetMinor",
+          "deadline",
+          "revisionsWanted",
+          "minRevisions",
+          "notes"
+        ],
+        "description": "The buyer's private instruction derived from the request. Only returned to the session that owns the deal."
+      },
+      "Terms": {
+        "type": "object",
+        "properties": {
+          "priceMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "revisionLimit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 8
+          }
+        },
+        "required": [
+          "priceMinor",
+          "deadline",
+          "revisionLimit",
+          "count"
+        ],
+        "description": "The negotiable terms."
+      },
+      "GuardrailNote": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "detail"
+        ],
+        "description": "A correction the deterministic rules engine made to an agent's proposal."
+      },
+      "NegotiationMove": {
+        "type": "object",
+        "properties": {
+          "seq": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "actor": {
+            "type": "string",
+            "enum": [
+              "buyer",
+              "seller"
+            ]
+          },
+          "action": {
+            "type": "string",
+            "enum": [
+              "offer",
+              "counter",
+              "accept",
+              "reject"
+            ]
+          },
+          "terms": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Terms"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "guardrails": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GuardrailNote"
+            }
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "ai",
+              "scripted"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latencyMs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "seq",
+          "actor",
+          "action",
+          "terms",
+          "message",
+          "guardrails",
+          "source",
+          "model",
+          "latencyMs",
+          "createdAt"
+        ]
+      },
+      "VerificationRule": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^R\\d{1,2}$"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "deliverable_count",
+              "aspect_ratio_coverage",
+              "language_coverage",
+              "word_count",
+              "valid_format",
+              "deadline",
+              "brief_adherence",
+              "no_embedded_instructions"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "evaluator": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "ai"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "description",
+          "required",
+          "evaluator"
+        ]
+      },
+      "SettlementTerms": {
+        "type": "object",
+        "properties": {
+          "trigger": {
+            "const": "verified_delivery"
+          },
+          "autoCaptureMinConfidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "humanReviewMinConfidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "onExhaustedRevisions": {
+            "const": "void_authorization"
+          }
+        },
+        "required": [
+          "trigger",
+          "autoCaptureMinConfidence",
+          "humanReviewMinConfidence",
+          "onExhaustedRevisions"
+        ]
+      },
+      "Party": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ]
+      },
+      "Contract": {
+        "type": "object",
+        "properties": {
+          "contractId": {
+            "type": "string"
+          },
+          "schemaVersion": {
+            "const": 1
+          },
+          "dealId": {
+            "type": "string"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "title": {
+            "type": "string"
+          },
+          "category": {
+            "$ref": "#/components/schemas/Category"
+          },
+          "buyer": {
+            "$ref": "#/components/schemas/Party"
+          },
+          "seller": {
+            "$ref": "#/components/schemas/Party"
+          },
+          "price": {
+            "type": "object",
+            "properties": {
+              "amountMinor": {
+                "$ref": "#/components/schemas/Minor"
+              },
+              "currency": {
+                "const": "USD"
+              }
+            },
+            "required": [
+              "amountMinor",
+              "currency"
+            ]
+          },
+          "deadline": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "revisionLimit": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3
+          },
+          "deliverables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeliverableSpec"
+            },
+            "minItems": 1,
+            "maxItems": 1
+          },
+          "verificationRules": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VerificationRule"
+            },
+            "minItems": 1,
+            "maxItems": 12
+          },
+          "settlement": {
+            "$ref": "#/components/schemas/SettlementTerms"
+          }
+        },
+        "required": [
+          "contractId",
+          "schemaVersion",
+          "dealId",
+          "createdAt",
+          "title",
+          "category",
+          "buyer",
+          "seller",
+          "price",
+          "deadline",
+          "revisionLimit",
+          "deliverables",
+          "verificationRules",
+          "settlement"
+        ],
+        "description": "The immutable contract compiled from the agreed terms."
+      },
+      "SignedContract": {
+        "type": "object",
+        "properties": {
+          "contract": {
+            "$ref": "#/components/schemas/Contract"
+          },
+          "termsHash": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$",
+            "description": "Lowercase hex SHA-256 of the canonical JSON of `contract`. Written to the PayPal order as custom_id `pact:v1:<hash>`."
+          }
+        },
+        "required": [
+          "contract",
+          "termsHash"
+        ]
+      },
+      "Policy": {
+        "type": "object",
+        "properties": {
+          "autonomousLimitMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "maxTransactionMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "dailyLimitMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "allowedCategories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Category"
+            }
+          },
+          "requireApprovalForNewSellers": {
+            "type": "boolean"
+          },
+          "autoCaptureMinConfidence": {
+            "type": "number",
+            "minimum": 0.5,
+            "maximum": 1
+          },
+          "humanReviewMinConfidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          }
+        },
+        "required": [
+          "autonomousLimitMinor",
+          "maxTransactionMinor",
+          "dailyLimitMinor",
+          "allowedCategories",
+          "requireApprovalForNewSellers",
+          "autoCaptureMinConfidence",
+          "humanReviewMinConfidence"
+        ],
+        "description": "Deterministic spending policy. autonomousLimitMinor ≤ maxTransactionMinor and humanReviewMinConfidence ≤ autoCaptureMinConfidence."
+      },
+      "PolicyCheck": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "needs_approval",
+              "block"
+            ]
+          },
+          "detail": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "label",
+          "outcome",
+          "detail"
+        ]
+      },
+      "PolicyEvaluation": {
+        "type": "object",
+        "properties": {
+          "outcome": {
+            "$ref": "#/components/schemas/PolicyOutcome"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PolicyCheck"
+            }
+          },
+          "spentTodayMinor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "evaluatedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "outcome",
+          "checks",
+          "spentTodayMinor",
+          "evaluatedAt"
+        ]
+      },
+      "IllustrationArtifact": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "illustration"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "aspectRatio": {
+            "type": "string",
+            "description": "Aspect ratio the seller claims; the verifier recomputes it."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "format": {
+            "const": "svg"
+          },
+          "svg": {
+            "type": "string",
+            "description": "Sanitized SVG markup."
+          },
+          "description": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "index",
+          "title",
+          "aspectRatio",
+          "width",
+          "height",
+          "format",
+          "svg",
+          "description"
+        ]
+      },
+      "CopyArtifact": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "const": "copy"
+          },
+          "index": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "title": {
+            "type": "string"
+          },
+          "language": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "index",
+          "title",
+          "language",
+          "text"
+        ]
+      },
+      "Artifact": {
+        "oneOf": [
+          {
+            "$ref": "#/components/schemas/IllustrationArtifact"
+          },
+          {
+            "$ref": "#/components/schemas/CopyArtifact"
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind"
+        }
+      },
+      "Submission": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dealId": {
+            "type": "string"
+          },
+          "round": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Artifact"
+            }
+          },
+          "note": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "ai",
+              "scripted"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "submittedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "id",
+          "dealId",
+          "round",
+          "artifacts",
+          "note",
+          "source",
+          "model",
+          "submittedAt"
+        ]
+      },
+      "VerificationCheck": {
+        "type": "object",
+        "properties": {
+          "ruleId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "deliverable_count",
+              "aspect_ratio_coverage",
+              "language_coverage",
+              "word_count",
+              "valid_format",
+              "deadline",
+              "brief_adherence",
+              "no_embedded_instructions"
+            ]
+          },
+          "condition": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "evaluator": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "ai"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "uncertain"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "evidence": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "artifactIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "ruleId",
+          "kind",
+          "condition",
+          "required",
+          "evaluator",
+          "result",
+          "confidence",
+          "evidence",
+          "explanation",
+          "artifactIds"
+        ]
+      },
+      "VerificationReport": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dealId": {
+            "type": "string"
+          },
+          "submissionId": {
+            "type": "string"
+          },
+          "round": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "contractHash": {
+            "type": "string"
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VerificationCheck"
+            }
+          },
+          "decision": {
+            "$ref": "#/components/schemas/VerificationDecision"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": "Lowest confidence among required checks."
+          },
+          "summary": {
+            "type": "string"
+          },
+          "failedRuleIds": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "degraded": {
+            "type": "boolean",
+            "description": "True when the AI evaluator was unavailable and AI rules were marked uncertain."
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "id",
+          "dealId",
+          "submissionId",
+          "round",
+          "contractHash",
+          "checks",
+          "decision",
+          "confidence",
+          "summary",
+          "failedRuleIds",
+          "degraded",
+          "model",
+          "createdAt"
+        ]
+      },
+      "HumanDecision": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/HumanDecisionKind"
+          },
+          "percent": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1,
+            "maximum": 99
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "decidedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "kind",
+          "percent",
+          "reason",
+          "decidedAt"
+        ]
+      },
+      "AuditEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dealId": {
+            "type": "string"
+          },
+          "seq": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based, gapless per deal."
+          },
+          "at": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "actor": {
+            "type": "string",
+            "enum": [
+              "human",
+              "buyer_agent",
+              "seller_agent",
+              "contract_engine",
+              "policy_engine",
+              "payment_orchestrator",
+              "paypal",
+              "verifier",
+              "system"
+            ]
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "intent.received",
+              "mandate.derived",
+              "seller.matched",
+              "negotiation.move",
+              "negotiation.guardrail",
+              "negotiation.agreed",
+              "negotiation.failed",
+              "contract.created",
+              "policy.evaluated",
+              "policy.approval_requested",
+              "human.approved_spend",
+              "human.declined_spend",
+              "payment.order_created",
+              "payment.approved",
+              "payment.authorized",
+              "payment.capture_blocked",
+              "payment.capture_pending",
+              "payment.captured",
+              "payment.voided",
+              "payment.cancelled",
+              "payment.expired",
+              "payment.failed",
+              "payment.webhook",
+              "payment.reconciled",
+              "delivery.submitted",
+              "verification.completed",
+              "verification.review_requested",
+              "human.released_payment",
+              "human.requested_revision",
+              "human.rejected_delivery",
+              "revision.requested",
+              "deal.completed",
+              "deal.rejected",
+              "deal.expired",
+              "deal.failed",
+              "system.degraded",
+              "system.error"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "data": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "additionalProperties": true
+          },
+          "prevHash": {
+            "type": "string"
+          },
+          "hash": {
+            "type": "string",
+            "description": "sha256(prevHash + canonical JSON of the event)."
+          }
+        },
+        "required": [
+          "id",
+          "dealId",
+          "seq",
+          "at",
+          "actor",
+          "type",
+          "title",
+          "detail",
+          "data",
+          "prevHash",
+          "hash"
+        ],
+        "description": "One entry of the hash-chained audit trail."
+      },
+      "SellerPublic": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "tagline": {
+            "type": "string"
+          },
+          "categories": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Category"
+            }
+          },
+          "trust": {
+            "type": "string",
+            "enum": [
+              "established",
+              "new"
+            ]
+          },
+          "completedDeals": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "firstPassRate": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "demoFault": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "omits_variant",
+              "embeds_instructions"
+            ],
+            "description": "Set only for sellers with a controlled demo fault."
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "tagline",
+          "categories",
+          "trust",
+          "completedDeals",
+          "firstPassRate",
+          "demoFault"
+        ]
+      },
+      "PaymentRecord": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/ProviderKind"
+          },
+          "mode": {
+            "$ref": "#/components/schemas/ApprovalMode"
+          },
+          "status": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "orderId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "authorizationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "captureId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "amountMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "authorizedMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "capturedMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "currency": {
+            "const": "USD"
+          },
+          "approveUrl": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where the payer approves the order. A path for the simulator."
+          },
+          "authorizationExpiresAt": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "payerEmailMasked": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "lastError": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "issue": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "debugId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "at": {
+                "$ref": "#/components/schemas/IsoDateTime"
+              }
+            },
+            "required": [
+              "issue",
+              "message",
+              "debugId",
+              "at"
+            ]
+          },
+          "webhookConfirmed": {
+            "type": "object",
+            "properties": {
+              "authorized": {
+                "type": "boolean"
+              },
+              "captured": {
+                "type": "boolean"
+              },
+              "voided": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "authorized",
+              "captured",
+              "voided"
+            ]
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "provider",
+          "mode",
+          "status",
+          "orderId",
+          "authorizationId",
+          "captureId",
+          "amountMinor",
+          "authorizedMinor",
+          "capturedMinor",
+          "currency",
+          "approveUrl",
+          "authorizationExpiresAt",
+          "payerEmailMasked",
+          "lastError",
+          "webhookConfirmed",
+          "updatedAt"
+        ],
+        "description": "The deal's payment as PACT records it. All ids are the provider's. Never contains a vault id."
+      },
+      "NextStep": {
+        "oneOf": [
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "auto"
+              },
+              "step": {
+                "$ref": "#/components/schemas/StepKind"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "step",
+              "label"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "human"
+              },
+              "gate": {
+                "type": "string",
+                "enum": [
+                  "approval",
+                  "payment",
+                  "review"
+                ]
+              },
+              "label": {
+                "type": "string"
+              },
+              "options": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HumanDecisionKind"
+                }
+              }
+            },
+            "required": [
+              "kind",
+              "gate",
+              "label",
+              "options"
+            ]
+          },
+          {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "const": "done"
+              },
+              "label": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind",
+              "label"
+            ]
+          }
+        ],
+        "discriminator": {
+          "propertyName": "kind"
+        },
+        "description": "What happens next: an automatic step, a human gate, or nothing."
+      },
+      "DealView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string",
+            "description": "Human-friendly reference, e.g. PACT-7Q4M."
+          },
+          "status": {
+            "$ref": "#/components/schemas/DealStatus"
+          },
+          "statusLabel": {
+            "type": "string"
+          },
+          "scenarioId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "intent": {
+            "type": "string"
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "isOwner": {
+            "type": "boolean",
+            "description": "True when the calling session created this deal and may act on it."
+          },
+          "seller": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SellerPublic"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mandate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Mandate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "negotiation": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "type": "string",
+                "enum": [
+                  "open",
+                  "agreed",
+                  "failed"
+                ]
+              },
+              "moves": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/NegotiationMove"
+                }
+              },
+              "agreedTerms": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Terms"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "failureReason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "maxMoves": {
+                "type": "integer"
+              },
+              "listPriceMinor": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/Minor"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            },
+            "required": [
+              "status",
+              "moves",
+              "agreedTerms",
+              "failureReason",
+              "maxMoves",
+              "listPriceMinor"
+            ]
+          },
+          "contract": {
+            "anyOf": [
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/SignedContract"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "paymentState": {
+                        "$ref": "#/components/schemas/PaymentStatus"
+                      }
+                    },
+                    "required": [
+                      "paymentState"
+                    ]
+                  }
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The hashed contract plus the live payment state (the state is not part of the hash)."
+          },
+          "policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyEvaluation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "payment": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaymentRecord"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "submissions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Submission"
+            }
+          },
+          "reports": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/VerificationReport"
+            }
+          },
+          "audit": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEvent"
+            }
+          },
+          "revisions": {
+            "type": "object",
+            "properties": {
+              "used": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "limit": {
+                "type": "integer",
+                "minimum": 0
+              }
+            },
+            "required": [
+              "used",
+              "limit"
+            ]
+          },
+          "humanDecision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HumanDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "next": {
+            "$ref": "#/components/schemas/NextStep"
+          },
+          "flags": {
+            "type": "object",
+            "properties": {
+              "aiDegraded": {
+                "type": "boolean"
+              },
+              "simulatedPayment": {
+                "type": "boolean"
+              },
+              "auditChainValid": {
+                "type": "boolean",
+                "description": "Result of re-verifying the audit hash chain on read."
+              }
+            },
+            "required": [
+              "aiDegraded",
+              "simulatedPayment",
+              "auditChainValid"
+            ]
+          },
+          "lastError": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "status",
+          "statusLabel",
+          "scenarioId",
+          "intent",
+          "createdAt",
+          "updatedAt",
+          "isOwner",
+          "seller",
+          "mandate",
+          "negotiation",
+          "contract",
+          "policy",
+          "payment",
+          "submissions",
+          "reports",
+          "audit",
+          "revisions",
+          "humanDecision",
+          "next",
+          "flags",
+          "lastError"
+        ]
+      },
+      "DealSummary": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DealStatus"
+          },
+          "statusLabel": {
+            "type": "string"
+          },
+          "scenarioId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sellerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priceMinor": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Minor"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "title",
+          "status",
+          "statusLabel",
+          "scenarioId",
+          "sellerName",
+          "priceMinor",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "CreateDealRequest": {
+        "type": "object",
+        "properties": {
+          "intent": {
+            "type": "string",
+            "maxLength": 4000,
+            "description": "The request in plain words, 10–600 characters after cleaning. May be empty when scenarioId is given."
+          },
+          "scenarioId": {
+            "type": "string",
+            "enum": [
+              "happy-path",
+              "revision",
+              "approval",
+              "injection"
+            ],
+            "description": "Optional demo scenario: pre-fills the request and pins the seller agent — as long as the request still asks for the kind of work that seller offers; otherwise the request is matched like a free-form one."
+          },
+          "tzOffsetMinutes": {
+            "type": "integer",
+            "minimum": -840,
+            "maximum": 720,
+            "description": "The browser's Date#getTimezoneOffset(), so \"tomorrow at 6 PM\" resolves in local time."
+          }
+        },
+        "required": [
+          "intent"
+        ],
+        "description": "No amount, status, seller or contract can be supplied: they are derived on the server."
+      },
+      "DealResponse": {
+        "type": "object",
+        "properties": {
+          "deal": {
+            "$ref": "#/components/schemas/DealView"
+          }
+        },
+        "required": [
+          "deal"
+        ]
+      },
+      "DealListResponse": {
+        "type": "object",
+        "properties": {
+          "deals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DealSummary"
+            }
+          }
+        },
+        "required": [
+          "deals"
+        ]
+      },
+      "AdvanceResponse": {
+        "type": "object",
+        "properties": {
+          "deal": {
+            "$ref": "#/components/schemas/DealView"
+          },
+          "executed": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/StepKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "busy": {
+            "type": "boolean",
+            "description": "True when another request holds the step lease; poll again."
+          }
+        },
+        "required": [
+          "deal",
+          "executed",
+          "busy"
+        ]
+      },
+      "DecisionRequest": {
+        "type": "object",
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/HumanDecisionKind"
+          },
+          "percent": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 99,
+            "description": "Required for release_partial: percentage of the contract price to capture."
+          },
+          "reason": {
+            "type": "string",
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "OpsRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "code": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/DealStatus"
+          },
+          "statusLabel": {
+            "type": "string"
+          },
+          "stage": {
+            "type": "string",
+            "enum": [
+              "negotiation",
+              "contract",
+              "payment",
+              "fulfillment",
+              "verification",
+              "settled",
+              "closed"
+            ]
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "in_progress",
+              "captured",
+              "voided",
+              "declined",
+              "blocked",
+              "no_agreement",
+              "failed"
+            ]
+          },
+          "buyer": {
+            "type": "string"
+          },
+          "seller": {
+            "type": "string"
+          },
+          "sellerId": {
+            "type": "string"
+          },
+          "sellerTrust": {
+            "type": "string",
+            "enum": [
+              "established",
+              "new"
+            ]
+          },
+          "category": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Category"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scenarioId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "type": "string",
+            "enum": [
+              "mine",
+              "showcase"
+            ],
+            "description": "`mine` = created by the calling session, `showcase` = seeded reference deals."
+          },
+          "priceMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "listPriceMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "savedMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "authorizedMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "capturedMinor": {
+            "$ref": "#/components/schemas/Minor"
+          },
+          "heldMinor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Authorized and neither captured nor released."
+          },
+          "currency": {
+            "const": "USD"
+          },
+          "paymentStatus": {
+            "$ref": "#/components/schemas/PaymentStatus"
+          },
+          "paymentProvider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paymentMode": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ApprovalMode"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "paypalOrderId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paypalAuthorizationId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paypalCaptureId": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "webhookConfirmed": {
+            "type": "boolean"
+          },
+          "verificationDecision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/VerificationDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "minimum": 0,
+            "maximum": 1
+          },
+          "failedRules": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "revisionsUsed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "revisionLimit": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "negotiationMoves": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "guardrailInterventions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "policyOutcome": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PolicyOutcome"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "policyFlags": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "humanDecisions": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "risk": {
+            "$ref": "#/components/schemas/RiskLevel"
+          },
+          "riskReasons": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "aiDegraded": {
+            "type": "boolean"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IsoDateTime"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "hoursToDeadline": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "description": "One decimal; negative once the deadline has passed."
+          },
+          "createdAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "updatedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "day": {
+            "type": "string",
+            "format": "date",
+            "description": "UTC day the deal was created."
+          }
+        },
+        "required": [
+          "id",
+          "code",
+          "title",
+          "status",
+          "statusLabel",
+          "stage",
+          "outcome",
+          "buyer",
+          "seller",
+          "sellerId",
+          "sellerTrust",
+          "category",
+          "scenarioId",
+          "origin",
+          "priceMinor",
+          "listPriceMinor",
+          "savedMinor",
+          "authorizedMinor",
+          "capturedMinor",
+          "heldMinor",
+          "currency",
+          "paymentStatus",
+          "paymentProvider",
+          "paymentMode",
+          "paypalOrderId",
+          "paypalAuthorizationId",
+          "paypalCaptureId",
+          "webhookConfirmed",
+          "verificationDecision",
+          "confidence",
+          "failedRules",
+          "revisionsUsed",
+          "revisionLimit",
+          "negotiationMoves",
+          "guardrailInterventions",
+          "policyOutcome",
+          "policyFlags",
+          "humanDecisions",
+          "risk",
+          "riskReasons",
+          "aiDegraded",
+          "deadline",
+          "hoursToDeadline",
+          "createdAt",
+          "updatedAt",
+          "day"
+        ],
+        "description": "One row of the operations ledger."
+      },
+      "OpsPaymentEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dealId": {
+            "type": "string"
+          },
+          "dealCode": {
+            "type": "string"
+          },
+          "at": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "order_created",
+              "approved",
+              "authorized",
+              "capture_blocked",
+              "capture_pending",
+              "captured",
+              "voided",
+              "cancelled",
+              "expired",
+              "failed",
+              "webhook",
+              "reconciled"
+            ],
+            "description": "The audit event type without its `payment.` prefix."
+          },
+          "amountMinor": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "The amount the event itself states; 0 when it states none."
+          },
+          "seller": {
+            "type": "string"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ProviderKind"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The most specific provider id the event is about."
+          }
+        },
+        "required": [
+          "id",
+          "dealId",
+          "dealCode",
+          "at",
+          "day",
+          "type",
+          "amountMinor",
+          "seller",
+          "provider",
+          "reference"
+        ]
+      },
+      "OpsCheckRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "dealId": {
+            "type": "string"
+          },
+          "dealCode": {
+            "type": "string"
+          },
+          "round": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "ruleId": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "condition": {
+            "type": "string"
+          },
+          "evaluator": {
+            "type": "string",
+            "enum": [
+              "deterministic",
+              "ai"
+            ]
+          },
+          "result": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "uncertain"
+            ]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "seller": {
+            "type": "string"
+          },
+          "at": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          }
+        },
+        "required": [
+          "id",
+          "dealId",
+          "dealCode",
+          "round",
+          "ruleId",
+          "kind",
+          "condition",
+          "evaluator",
+          "result",
+          "confidence",
+          "required",
+          "seller",
+          "at"
+        ]
+      },
+      "OpsSnapshot": {
+        "type": "object",
+        "properties": {
+          "generatedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "deals": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpsRow"
+            },
+            "maxItems": 300
+          },
+          "paymentEvents": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpsPaymentEvent"
+            }
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OpsCheckRow"
+            }
+          },
+          "totals": {
+            "type": "object",
+            "properties": {
+              "deals": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "authorizedMinor": {
+                "$ref": "#/components/schemas/Minor"
+              },
+              "capturedMinor": {
+                "$ref": "#/components/schemas/Minor"
+              },
+              "heldMinor": {
+                "$ref": "#/components/schemas/Minor"
+              },
+              "releasedMinor": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Voided or expired authorizations plus the uncaptured remainder of partial captures."
+              },
+              "pendingHumanReview": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Deals waiting for a spend approval or a delivery review."
+              },
+              "verificationFailureRate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Share of first deliveries that were not capture-eligible. 0 when nothing was verified."
+              },
+              "firstPassRate": {
+                "type": "number",
+                "minimum": 0,
+                "maximum": 1,
+                "description": "Share of first deliveries that were capture-eligible. 0 when nothing was verified."
+              }
+            },
+            "required": [
+              "deals",
+              "authorizedMinor",
+              "capturedMinor",
+              "heldMinor",
+              "releasedMinor",
+              "pendingHumanReview",
+              "verificationFailureRate",
+              "firstPassRate"
+            ]
+          }
+        },
+        "required": [
+          "generatedAt",
+          "deals",
+          "paymentEvents",
+          "checks",
+          "totals"
+        ]
+      },
+      "SystemStatus": {
+        "type": "object",
+        "properties": {
+          "payments": {
+            "type": "object",
+            "properties": {
+              "provider": {
+                "$ref": "#/components/schemas/ProviderKind"
+              },
+              "configured": {
+                "type": "boolean",
+                "description": "PayPal REST credentials are configured."
+              },
+              "webhooks": {
+                "type": "boolean",
+                "description": "A webhook id for signature verification is configured."
+              },
+              "delegatedWallet": {
+                "type": "boolean",
+                "description": "The shared demo wallet is connected, so in-policy deals authorize without a PayPal login."
+              }
+            },
+            "required": [
+              "provider",
+              "configured",
+              "webhooks",
+              "delegatedWallet"
+            ]
+          },
+          "ai": {
+            "type": "object",
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "ai",
+                  "scripted"
+                ]
+              },
+              "buyerModel": {
+                "type": "string"
+              },
+              "sellerModel": {
+                "type": "string"
+              },
+              "verifierModel": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "buyerModel",
+              "sellerModel",
+              "verifierModel"
+            ]
+          },
+          "database": {
+            "type": "string",
+            "enum": [
+              "postgres",
+              "pglite"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "degraded": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "enum": [
+                "database",
+                "payments"
+              ]
+            },
+            "description": "Present only when a component could not be checked or is misconfigured."
+          }
+        },
+        "required": [
+          "payments",
+          "ai",
+          "database",
+          "version"
+        ],
+        "description": "What is configured, never the values."
+      },
+      "PolicyResponse": {
+        "type": "object",
+        "properties": {
+          "policy": {
+            "$ref": "#/components/schemas/Policy"
+          },
+          "spentTodayMinor": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "isDefault": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "policy",
+          "spentTodayMinor",
+          "isDefault"
+        ]
+      },
+      "WalletScope": {
+        "type": "string",
+        "enum": [
+          "session",
+          "demo"
+        ],
+        "description": "`session` = the caller's own wallet; `demo` = the shared wallet of the public demo (operator only)."
+      },
+      "WalletStatus": {
+        "type": "object",
+        "properties": {
+          "provider": {
+            "$ref": "#/components/schemas/ProviderKind"
+          },
+          "supportsVault": {
+            "type": "boolean"
+          },
+          "session": {
+            "type": "object",
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              },
+              "pending": {
+                "type": "boolean"
+              },
+              "payerEmailMasked": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "connected",
+              "pending",
+              "payerEmailMasked"
+            ]
+          },
+          "demo": {
+            "type": "object",
+            "properties": {
+              "connected": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "connected"
+            ]
+          },
+          "effectiveMode": {
+            "$ref": "#/components/schemas/ApprovalMode"
+          }
+        },
+        "required": [
+          "provider",
+          "supportsVault",
+          "session",
+          "demo",
+          "effectiveMode"
+        ],
+        "description": "Delegated agent wallet status. The vault id is never part of any response."
+      },
+      "WalletConnectRequest": {
+        "type": "object",
+        "properties": {
+          "scope": {
+            "$ref": "#/components/schemas/WalletScope"
+          }
+        },
+        "required": [
+          "scope"
+        ],
+        "additionalProperties": false
+      },
+      "WalletConnectResponse": {
+        "type": "object",
+        "properties": {
+          "approveUrl": {
+            "type": "string",
+            "format": "uri",
+            "description": "Absolute URL where the payer gives consent."
+          }
+        },
+        "required": [
+          "approveUrl"
+        ]
+      },
+      "ReconciliationFact": {
+        "type": "object",
+        "properties": {
+          "field": {
+            "type": "string",
+            "description": "e.g. \"Order status\", \"Authorized amount\", \"Contract binding (custom_id)\"."
+          },
+          "pact": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "PACT's ledger value. For statuses it includes what PACT expects the provider to report."
+          },
+          "paypal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider's value."
+          },
+          "match": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field",
+          "pact",
+          "paypal",
+          "match"
+        ]
+      },
+      "ReconciliationView": {
+        "type": "object",
+        "properties": {
+          "dealId": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "match",
+              "mismatch",
+              "unavailable"
+            ],
+            "description": "Computed deterministically from `facts`. `unavailable`: there was nothing to compare or the provider could not be read."
+          },
+          "checkedAt": {
+            "$ref": "#/components/schemas/IsoDateTime"
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReconciliationFact"
+            }
+          },
+          "narrative": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 600,
+            "description": "Plain-language statement by the read-only auditor agent. Null when the agent did not run."
+          },
+          "toolCalls": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "tool": {
+                  "type": "string"
+                },
+                "ok": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "tool",
+                "ok"
+              ]
+            },
+            "description": "PayPal Agent Toolkit tools the agent called, in order. Only `get_order` is ever available to it."
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "ai",
+              "deterministic"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "dealId",
+          "status",
+          "checkedAt",
+          "facts",
+          "narrative",
+          "toolCalls",
+          "source",
+          "model",
+          "note"
+        ]
+      },
+      "SimulatedOrderRequest": {
+        "type": "object",
+        "properties": {
+          "orderId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "required": [
+          "orderId"
+        ]
+      },
+      "SimulatedApprovalResult": {
+        "type": "object",
+        "properties": {
+          "dealId": {
+            "type": "string"
+          },
+          "outcome": {
+            "type": "string",
+            "enum": [
+              "authorized",
+              "pending",
+              "failed"
+            ]
+          }
+        },
+        "required": [
+          "dealId",
+          "outcome"
+        ]
+      },
+      "SimulatedCancelResult": {
+        "type": "object",
+        "properties": {
+          "dealId": {
+            "type": "string"
+          },
+          "outcome": {
+            "const": "cancelled"
+          }
+        },
+        "required": [
+          "dealId",
+          "outcome"
+        ]
+      },
+      "WebhookAck": {
+        "type": "object",
+        "properties": {
+          "received": {
+            "const": true
+          }
+        },
+        "required": [
+          "received"
+        ]
+      },
+      "ApiErrorBody": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string",
+                "enum": [
+                  "invalid_request",
+                  "not_found",
+                  "forbidden",
+                  "conflict",
+                  "rate_limited",
+                  "payment_error",
+                  "unavailable",
+                  "internal"
+                ]
+              },
+              "message": {
+                "type": "string"
+              },
+              "requestId": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "details": {
+                "description": "Present for some errors: validation issues, `{ resetAt }` for rate limits, `{ issue, debugId, retryable }` for payment errors."
+              }
+            },
+            "required": [
+              "code",
+              "message",
+              "requestId"
+            ]
+          }
+        },
+        "required": [
+          "error"
+        ],
+        "description": "Every error response has this shape. Internal details are logged with the request id, never returned."
+      }
+    }
+  }
+}
