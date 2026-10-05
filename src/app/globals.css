@@ -1,26 +1,368 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * PACT design tokens.
+ *
+ * Every colour in the product comes from the variables below. They are declared once per
+ * theme and mapped into Tailwind in the `@theme inline` block, so components never need a
+ * `dark:` variant: `bg-surface text-fg border-hairline` is correct in both themes.
+ *
+ * Theme switching: the inline script in the root layout sets `data-theme="light|dark"` on
+ * <html> before first paint (and `data-ag-theme-mode` in sync, which AG Grid / AG Studio read).
+ * Contrast: every text/background pair used by the primitives meets WCAG AA (4.5:1).
+ */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* Surfaces */
+  --canvas: #f6f7f9;
+  --surface: #ffffff;
+  --subtle: #f1f3f6;
+  --subtle-strong: #e8ebf0;
+  --inverse: #0b1220;
+  --on-inverse: #f2f4f7;
+  --on-inverse-muted: #9aa4b2;
+
+  /* Text */
+  --fg: #0b1220;
+  --fg-muted: #5b6472;
+  --fg-faint: #667085;
+
+  /* Lines */
+  --hairline: #e4e7ec;
+  --hairline-strong: #cfd4dc;
+
+  /* Brand accent: the colour of "verified and settled" */
+  --accent: #0b7a5b;
+  --accent-hover: #096a4f;
+  --accent-soft: #e6f4ef;
+  --on-accent: #ffffff;
+
+  /* Status hues: foreground on its own soft background */
+  --info: #4338ca;
+  --info-soft: #eef2ff;
+  --hold: #b45309;
+  --hold-soft: #fef3c7;
+  --success: #0b7a5b;
+  --success-soft: #e6f4ef;
+  --review: #6d28d9;
+  --review-soft: #f3e8ff;
+  --danger: #b42318;
+  --danger-soft: #fee4e2;
+  --neutral: #475467;
+  --neutral-soft: #eef0f3;
+
+  --danger-solid: #b42318;
+  --danger-solid-hover: #912018;
+  --on-danger: #ffffff;
+
+  --overlay: rgb(11 18 32 / 0.42);
+  --shadow-pop-value: 0 12px 32px -8px rgb(11 18 32 / 0.14), 0 2px 6px -2px rgb(11 18 32 / 0.06);
+}
+
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --canvas: #0a0f1a;
+  --surface: #101826;
+  --subtle: #162032;
+  --subtle-strong: #1c2940;
+  --inverse: #131c2c;
+  --on-inverse: #f2f4f7;
+  --on-inverse-muted: #9aa4b2;
+
+  --fg: #e6eaf0;
+  --fg-muted: #97a1b2;
+  --fg-faint: #7f8a9c;
+
+  --hairline: #1e293b;
+  --hairline-strong: #2c3a50;
+
+  --accent: #34d399;
+  --accent-hover: #5ce0b0;
+  --accent-soft: #0f2a24;
+  --on-accent: #04241a;
+
+  --info: #a5b4fc;
+  --info-soft: #1b2147;
+  --hold: #fbbf24;
+  --hold-soft: #2b2110;
+  --success: #34d399;
+  --success-soft: #0f2a24;
+  --review: #c4b5fd;
+  --review-soft: #27194a;
+  --danger: #fda29b;
+  --danger-soft: #3a1614;
+  --neutral: #b6c0ce;
+  --neutral-soft: #1a2434;
+
+  --danger-solid: #f97066;
+  --danger-solid-hover: #fda29b;
+  --on-danger: #2a0a07;
+
+  --overlay: rgb(2 6 14 / 0.66);
+  --shadow-pop-value: 0 16px 40px -8px rgb(0 0 0 / 0.6), 0 2px 8px -2px rgb(0 0 0 / 0.4);
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-subtle: var(--subtle);
+  --color-subtle-strong: var(--subtle-strong);
+  --color-inverse: var(--inverse);
+  --color-on-inverse: var(--on-inverse);
+  --color-on-inverse-muted: var(--on-inverse-muted);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-faint: var(--fg-faint);
+
+  --color-hairline: var(--hairline);
+  --color-hairline-strong: var(--hairline-strong);
+
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-soft: var(--accent-soft);
+  --color-on-accent: var(--on-accent);
+  --color-ring: var(--accent);
+
+  --color-info: var(--info);
+  --color-info-soft: var(--info-soft);
+  --color-hold: var(--hold);
+  --color-hold-soft: var(--hold-soft);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-review: var(--review);
+  --color-review-soft: var(--review-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-neutral: var(--neutral);
+  --color-neutral-soft: var(--neutral-soft);
+
+  --color-danger-solid: var(--danger-solid);
+  --color-danger-solid-hover: var(--danger-solid-hover);
+  --color-on-danger: var(--on-danger);
+
+  --color-overlay: var(--overlay);
+
+  --radius-control: 8px;
+  --radius-card: 10px;
+
+  --shadow-pop: var(--shadow-pop-value);
+
+  --animate-fade-in: pact-fade-in 160ms ease-out both;
+  --animate-fade-out: pact-fade-out 120ms ease-in both;
+  --animate-pop-in: pact-pop-in 160ms ease-out both;
+  --animate-rise-in: pact-rise-in 200ms ease-out both;
+  --animate-slide-in-right: pact-slide-in-right 200ms ease-out both;
+  --animate-slide-out-right: pact-slide-out-right 160ms ease-in both;
+  --animate-slide-in-left: pact-slide-in-left 200ms ease-out both;
+  --animate-slide-out-left: pact-slide-out-left 160ms ease-in both;
+  --animate-slide-in-bottom: pact-slide-in-bottom 200ms ease-out both;
+  --animate-slide-out-bottom: pact-slide-out-bottom 160ms ease-in both;
+  --animate-pulse-dot: pact-pulse-dot 1.8s ease-out infinite;
+  --animate-shimmer: pact-shimmer 1.6s ease-in-out infinite;
+  --animate-dash: pact-dash 1.2s linear infinite;
+
+  @keyframes pact-fade-in {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes pact-fade-out {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0;
+    }
+  }
+  @keyframes pact-pop-in {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @keyframes pact-rise-in {
+    from {
+      opacity: 0;
+      transform: translateY(6px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  @keyframes pact-slide-in-right {
+    from {
+      transform: translateX(100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+  @keyframes pact-slide-out-right {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(100%);
+    }
+  }
+  @keyframes pact-slide-in-left {
+    from {
+      transform: translateX(-100%);
+    }
+    to {
+      transform: translateX(0);
+    }
+  }
+  @keyframes pact-slide-out-left {
+    from {
+      transform: translateX(0);
+    }
+    to {
+      transform: translateX(-100%);
+    }
+  }
+  @keyframes pact-slide-in-bottom {
+    from {
+      transform: translateY(100%);
+    }
+    to {
+      transform: translateY(0);
+    }
+  }
+  @keyframes pact-slide-out-bottom {
+    from {
+      transform: translateY(0);
+    }
+    to {
+      transform: translateY(100%);
+    }
+  }
+  @keyframes pact-pulse-dot {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 45%, transparent);
+    }
+    70%,
+    100% {
+      box-shadow: 0 0 0 6px color-mix(in srgb, currentColor 0%, transparent);
+    }
+  }
+  @keyframes pact-shimmer {
+    0%,
+    100% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0.55;
+    }
+  }
+  @keyframes pact-dash {
+    to {
+      stroke-dashoffset: -12;
+    }
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* `dark:` follows the data attribute, not the OS setting, so it always agrees with the tokens. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
+/* One focus treatment for every interactive element: visible on canvas, surface and accent fills. */
+@utility focus-ring {
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+/* Page gutter + max width shared by the header, footer and every page section. */
+@utility container-page {
+  width: 100%;
+  max-width: 1240px;
+  margin-inline: auto;
+  padding-inline: 1.25rem;
+  @media (width >= 40rem) {
+    padding-inline: 2rem;
+  }
+}
+
+@layer base {
+  html {
+    background: var(--canvas);
+    /* Keeps anchor targets clear of the sticky header. */
+    scroll-padding-top: 5rem;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background: var(--canvas);
+    color: var(--fg);
+    font-family: var(--font-sans);
+    font-feature-settings: "ss01", "cv11";
+    line-height: 1.6;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  /* Tailwind v4 resets buttons to the default cursor; a pointer is the clearer affordance here. */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  [role="tab"],
+  [role="menuitem"],
+  [role="menuitemcheckbox"],
+  [role="menuitemradio"],
+  [role="option"],
+  summary {
+    cursor: pointer;
+  }
+
+  /*
+   * Text fields and overlays replace the outline with a border or ring, which forced-colors
+   * mode (Windows High Contrast) discards. Restore a real outline there.
+   */
+  @media (forced-colors: active) {
+    :focus-visible {
+      outline: 2px solid CanvasText !important;
+      outline-offset: 2px !important;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    ::before,
+    ::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* Toasts (sonner): colours are mapped to tokens in components/ui/toaster.tsx; these finish the job. */
+[data-sonner-toaster] {
+  font-family: var(--font-sans);
+}
+[data-sonner-toast] {
+  box-shadow: var(--shadow-pop-value) !important;
+}
+[data-sonner-toast] [data-description] {
+  color: var(--fg-muted) !important;
 }
