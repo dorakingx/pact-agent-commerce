@@ -7,7 +7,8 @@
  *                            (local dev without keys, CI). Everything it produces is labelled "simulated".
  *
  * The LLM agents never receive a reference to a provider. Only the deterministic payment
- * orchestrator calls these methods, and only after the guards in ./guards.ts pass.
+ * orchestrator (./orchestrator.ts) calls these methods, and only after the settlement guards in
+ * ../domain/settlement.ts and its own precondition checks pass.
  */
 
 export type ProviderKind = "paypal_sandbox" | "simulated";
@@ -62,7 +63,7 @@ export interface OrderInfo {
   approveUrl: string | null;
   /** Present once the order has been authorized. */
   authorization: AuthorizationInfo | null;
-  /** Masked payer e-mail if PayPal returned one (e.g. "sb-****@personal.example.com"). */
+  /** Masked payer e-mail if PayPal returned one (e.g. "sb****@personal.example.com"). */
   payerEmailMasked: string | null;
   /** Vault id returned when the payer agreed to save PayPal during checkout. Server-side only. */
   vaultId: string | null;
