@@ -3,7 +3,8 @@
  * managed Postgres in production and on PGlite (in-process Postgres) for local dev and CI.
  *
  * JSONB columns hold documents whose shape is defined — and validated on every read and
- * write — by the Zod schemas in src/lib/domain/schemas.ts.
+ * write — by the Zod schemas in src/lib/domain/schemas.ts. Text columns typed with `$type<…>()`
+ * hold a closed set of domain values and are validated the same way by their repository.
  */
 import {
   boolean,
@@ -19,15 +20,18 @@ import {
 } from "drizzle-orm/pg-core";
 import type {
   Artifact,
+  Category,
   GuardrailNote,
   HumanDecision,
   Mandate,
+  NegotiationState,
   Policy,
   PolicyEvaluation,
   SignedContract,
   Terms,
   VerificationCheck,
 } from "../domain/schemas";
+import type { DealStatus } from "../domain/status";
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: "string" });
 
@@ -41,12 +45,12 @@ export const deals = pgTable(
     /** Anonymous session id that created the deal, or "system" for seeded showcase deals. */
     owner: text("owner").notNull(),
     scenarioId: text("scenario_id"),
-    status: text("status").notNull(),
+    status: text("status").$type<DealStatus>().notNull(),
     intent: text("intent").notNull(),
     mandate: jsonb("mandate").$type<Mandate>(),
-    category: text("category"),
+    category: text("category").$type<Category>(),
     sellerId: text("seller_id"),
-    negotiationStatus: text("negotiation_status").notNull().default("open"),
+    negotiationStatus: text("negotiation_status").$type<NegotiationState["status"]>().notNull().default("open"),
     agreedTerms: jsonb("agreed_terms").$type<Terms>(),
     negotiationFailure: text("negotiation_failure"),
     policyEvaluation: jsonb("policy_evaluation").$type<PolicyEvaluation>(),
