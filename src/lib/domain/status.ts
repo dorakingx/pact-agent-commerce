@@ -66,12 +66,16 @@ export const DEAL_TRANSITIONS: Record<DealStatus, readonly DealStatus[]> = {
   agreed: ["contracted"],
   contracted: ["payment_pending", "awaiting_approval", "blocked"],
   awaiting_approval: ["payment_pending", "declined"],
-  payment_pending: ["awaiting_payment", "authorized", "failed"],
+  // "blocked": the daily limit is re-checked under the owner's lock immediately before the order,
+  // and another deal of the same owner may have committed the remaining budget since signing.
+  payment_pending: ["awaiting_payment", "authorized", "blocked", "failed"],
   awaiting_payment: ["authorized", "cancelled", "expired", "failed"],
+  // "expired" from every state that still counts on the hold: PayPal can release an
+  // authorization at any moment, and a deal must not keep working towards a capture that cannot happen.
   authorized: ["submitted", "cancelled", "expired"],
-  submitted: ["verified", "revision_required", "in_review", "rejecting"],
+  submitted: ["verified", "revision_required", "in_review", "rejecting", "expired"],
   revision_required: ["submitted", "expired"],
-  in_review: ["verified", "revision_required", "rejecting"],
+  in_review: ["verified", "revision_required", "rejecting", "expired"],
   verified: ["completed", "failed", "expired"],
   rejecting: ["rejected", "failed"],
   completed: [],

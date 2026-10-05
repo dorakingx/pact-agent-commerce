@@ -175,9 +175,20 @@ describe("checkCaptureAllowed — payment state", () => {
     // Capture after capture, in each way the record can show it.
     expect(codes({ payment: payment({ status: "captured", capturedMinor: 4700, captureId: "3C679366HH908993F" }) })).toEqual(["already_captured"]);
     expect(codes({ payment: payment({ capturedMinor: 2350 }) })).toEqual(["already_captured"]);
-    expect(codes({ payment: payment({ captureId: "3C679366HH908993F" }) })).toEqual(["already_captured"]);
+    expect(codes({ payment: payment({ capturedMinor: 2350, captureId: "3C679366HH908993F" }) })).toEqual(["already_captured"]);
     expect(codes({ payment: payment({ status: "captured" }) })).toEqual(["already_captured"]);
     expectBlocked({ payment: payment({ capturedMinor: 1 }) }, "already_captured");
+  });
+
+  it("lets a capture PayPal left pending be asked for again: a capture id alone is not a capture", () => {
+    // Still authorized, nothing captured, but the id of the pending capture is on record.
+    const pending = payment({ captureId: "3C679366HH908993F", lastError: { issue: "CAPTURE_PENDING", message: "pending", debugId: null, at: "2026-10-06T08:00:00.000Z" } });
+    expect(guard({ payment: pending })).toEqual({ allowed: true, violations: [], amountMinor: 4700 });
+    // Every other check still applies to that record.
+    expect(codes({ payment: { ...pending, amountMinor: 4600 } })).toEqual(["amount_mismatch"]);
+    expect(codes({ payment: { ...pending, authorizationId: null } })).toEqual(["not_authorized"]);
+    expect(codes({ payment: { ...pending, status: "failed" } })).toEqual(["not_authorized"]);
+    expect(codes({ payment: pending, dealStatus: "in_review" })).toContain("status_not_verified");
   });
 
   it("refuses when the payment is not for the contract price [amount_mismatch]", () => {
@@ -401,7 +412,13 @@ describe("checkVoidAllowed", () => {
   it("refuses once anything has been captured [already_captured]", () => {
     expect(voidCodes("rejecting", payment({ status: "captured", capturedMinor: 4700, captureId: "3C679366HH908993F" }))).toEqual(["already_captured"]);
     expect(voidCodes("rejecting", payment({ capturedMinor: 1 }))).toEqual(["already_captured"]);
-    expect(voidCodes("rejecting", payment({ captureId: "3C679366HH908993F" }))).toEqual(["already_captured"]);
+    expect(voidCodes("rejecting", payment({ capturedMinor: 1, captureId: "3C679366HH908993F" }))).toEqual(["already_captured"]);
+  });
+
+  it("allows releasing a hold whose capture never completed (a capture id with nothing captured)", () => {
+    // A pending capture that PayPal then declined leaves the id behind; the hold is still a hold.
+    expect(voidCodes("failed", payment({ captureId: "3C679366HH908993F" }))).toEqual([]);
+    expect(voidCodes("verified", payment({ captureId: "3C679366HH908993F" }))).toEqual(["status_not_voidable"]);
   });
 
   it("refuses when there is nothing left to void [not_voidable]", () => {

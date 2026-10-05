@@ -109,11 +109,24 @@ function contractViolations(signed: SignedContract | null): GuardViolation[] {
   return [];
 }
 
+/**
+ * Money has moved: the record says captured, or shows a captured amount.
+ *
+ * A capture id alone does not mean that. PayPal can accept a capture and leave it PENDING: the
+ * orchestrator then keeps the id on a record that is still "authorized" with nothing captured,
+ * and the capture is confirmed by asking again with the same idempotency key — which PayPal
+ * answers for the capture it already has, so it can never become a second one. Treating that
+ * record as captured would refuse the very retry that settles it.
+ */
+function hasCaptured(payment: PaymentRecord): boolean {
+  return payment.status === "captured" || payment.capturedMinor > 0;
+}
+
 function paymentViolations(payment: PaymentRecord | null, priceMinor: number | null, now: Date): GuardViolation[] {
   if (payment === null) return [violation("payment_missing", "There is no payment record for this deal.")];
   const violations: GuardViolation[] = [];
 
-  if (payment.status === "captured" || payment.capturedMinor > 0 || payment.captureId !== null) {
+  if (hasCaptured(payment)) {
     violations.push(
       violation(
         "already_captured",
@@ -300,7 +313,7 @@ export function checkVoidAllowed(input: { dealStatus: DealStatus; payment: Payme
   }
   if (payment === null) {
     violations.push(violation("payment_missing", "There is no payment record for this deal."));
-  } else if (payment.status === "captured" || payment.capturedMinor > 0 || payment.captureId !== null) {
+  } else if (hasCaptured(payment)) {
     violations.push(
       violation("already_captured", "Funds have already been captured; a captured payment cannot be voided."),
     );

@@ -94,6 +94,18 @@ describe("deal state machine", () => {
     expect(cleared.sort()).toEqual(["awaiting_approval", "contracted"]);
   });
 
+  it("lets the spending policy block a deal at signing and again immediately before the order, nowhere else", () => {
+    const sources = DEAL_STATUSES.filter((status) => DEAL_TRANSITIONS[status].includes("blocked"));
+    expect(sources.sort()).toEqual(["contracted", "payment_pending"]);
+  });
+
+  it("lets a deal expire from exactly the states that count on a hold PayPal can release", () => {
+    const sources = DEAL_STATUSES.filter((status) => DEAL_TRANSITIONS[status].includes("expired"));
+    expect(sources.sort()).toEqual(["authorized", "awaiting_payment", "in_review", "revision_required", "submitted", "verified"]);
+    // A rejection is already releasing the hold: it ends as rejected (or failed), never expired.
+    expect(canTransition("rejecting", "expired")).toBe(false);
+  });
+
   it("answers canTransition from the table and throws on illegal moves", () => {
     expect(canTransition("verified", "completed")).toBe(true);
     expect(canTransition("authorized", "completed")).toBe(false);

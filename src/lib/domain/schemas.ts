@@ -505,6 +505,10 @@ export const AUDIT_EVENT_TYPES = [
   "revision.requested",
   "deal.completed",
   "deal.rejected",
+  // Deal-level outcomes forced by the payment's state. Kept apart from payment.expired /
+  // payment.failed, which state what the provider reported and are counted as payment events.
+  "deal.expired",
+  "deal.failed",
   "system.degraded",
   "system.error",
 ] as const;

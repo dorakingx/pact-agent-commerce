@@ -10,11 +10,11 @@
 import "server-only";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { mkdir } from "node:fs/promises";
-import path from "node:path";
 import type { Logger as QueryLogger } from "drizzle-orm/logger";
 import type { PgDatabase, PgQueryResultHKT } from "drizzle-orm/pg-core";
 import { getDatabaseUrl } from "../config";
 import { log } from "../observability/logger";
+import { projectPath } from "./paths";
 import { poolConfigFromUrl } from "./pool-config";
 import * as schema from "./schema";
 
@@ -41,7 +41,7 @@ const POOL_IDLE_TIMEOUT_MS = 5_000;
 const POOL_CONNECT_TIMEOUT_MS = 10_000;
 
 function migrationsFolder(): string {
-  return path.join(process.cwd(), "drizzle");
+  return projectPath("drizzle");
 }
 
 /** Marks the async context of a withTransaction callback for as long as that callback is running. */
@@ -131,7 +131,8 @@ async function openPglite(options: { dataDir?: string; image?: Blob; onQuery?: Q
   ]);
   let dataDir: string | undefined;
   if (options.dataDir) {
-    dataDir = path.resolve(options.dataDir);
+    // A relative directory (".pact-data/dev" in .env files) is the project's, wherever the server was started.
+    dataDir = projectPath(options.dataDir);
     // PGlite creates the data directory itself but not its parents.
     await mkdir(dataDir, { recursive: true });
   }

@@ -97,7 +97,12 @@ export interface CreateDealResponse {
 
 export interface AdvanceResponse {
   deal: DealView;
-  /** The step that was executed by this call, or null if nothing ran (human gate, terminal, or busy). */
+  /**
+   * The step this call ran to completion. Null when nothing did: the deal waits at a human gate
+   * or has ended, another request holds the lease (`busy`), the deal only followed what its
+   * payment record already said, or the step could not complete — then `deal.lastError` says why,
+   * `deal.next` still names the step, and calling again retries it (after a pause, not in a tight loop).
+   */
   executed: StepKind | null;
   /** True when another request holds the step lease; the client should simply poll again. */
   busy: boolean;
@@ -259,6 +264,11 @@ export interface SystemStatus {
   };
   database: "postgres" | "pglite";
   version: string;
+  /**
+   * Components that could not be checked or are misconfigured. Absent when everything is healthy;
+   * the health endpoint still answers 200 so that the status pill can say what is wrong.
+   */
+  degraded?: ("database" | "payments")[];
 }
 
 export interface PolicyResponse {
