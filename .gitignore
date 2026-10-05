@@ -56,3 +56,6 @@ next-env.d.ts
 
 # private working notes (research briefs, scratch)
 /.notes/
+
+# local agent tooling
+/.claude/

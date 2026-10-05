@@ -38,6 +38,10 @@ npm run test:e2e         # Playwright against the production build (needs `npx p
 npm run validate         # all of the above, in that order
 ```
 
+The end-to-end run starts its own server on port 3190 (`PACT_E2E_PORT`) with scripted agents, the
+payment simulator and an in-memory database, and drives all four demo scenarios over real HTTP
+(`tests/e2e/api-flow.spec.ts`).
+
 The live PayPal Sandbox tests (`tests/sandbox`, also `npm run test:sandbox`) are part of `npm test`
 and skip themselves unless `PAYPAL_CLIENT_ID` and `PAYPAL_CLIENT_SECRET` are set.
 
@@ -54,9 +58,13 @@ and asserts that capture is refused at every stage before a delivery is verified
 | `src/lib/ai` | Buyer, seller and verifier agents (Vercel AI SDK through the AI Gateway) and their scripted fallbacks |
 | `src/lib/studio` | The seller studio: produces the deliverables (sanitized SVG illustrations, multilingual copy) |
 | `src/lib/db` | Drizzle schema, repositories, idempotency ledger (Postgres in production, PGlite locally and in CI) |
+| `src/lib/services` | The step engine (one lifecycle step per request, the only writer of deal status), sessions, rate limits, policy, wallet, operations read model, reconciliation |
+| `src/app/api` | Route handlers; the API is described in [`public/openapi.json`](public/openapi.json) |
+| `scripts` | Migrations, PayPal webhook registration, and `npm run seed` (showcase deals run through the real engine) |
 | `src/components`, `src/app` | Design system, application shell and pages |
 | `drizzle` | SQL migrations |
-| `tests/integration`, `tests/sandbox` | Cross-module tests, and live PayPal Sandbox tests |
+| `tests/integration`, `tests/sandbox` | Cross-module and service tests, and live PayPal Sandbox tests |
+| `tests/e2e` | Playwright against the production build: the HTTP API end to end, and the pages |
 
 PACT runs against the PayPal **Sandbox** only and refuses to talk to the live API.
 

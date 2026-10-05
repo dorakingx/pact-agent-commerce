@@ -16,6 +16,7 @@
     "test:e2e": "playwright test",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx scripts/migrate.ts",
+    "seed": "tsx scripts/seed-showcase.ts",
     "validate": "npm run typecheck && npm run lint && npm run test && npm run build && npm run test:e2e",
     "vercel-build": "npm run db:migrate && next build"
   },
