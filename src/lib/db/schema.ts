@@ -259,6 +259,16 @@ export const webhookEvents = pgTable(
   (t) => [index("webhook_deal_idx").on(t.dealId)],
 );
 
+/**
+ * State for the payment SIMULATOR only (keyless local dev / CI). Never used when PayPal
+ * Sandbox credentials are configured.
+ */
+export const simulatedOrders = pgTable("simulated_orders", {
+  id: text("id").primaryKey(),
+  document: jsonb("document").$type<Record<string, unknown>>().notNull(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
 /** Fixed-window counters for abuse protection on the public demo. */
 export const rateLimits = pgTable("rate_limits", {
   key: text("key").primaryKey(),

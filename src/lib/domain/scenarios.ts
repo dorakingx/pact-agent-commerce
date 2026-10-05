@@ -32,7 +32,7 @@ export const SCENARIOS: readonly Scenario[] = [
     demonstrates: "A 1:1 version is missing → no capture → revision → re-verify → capture",
     outcome: "Revised, then captured",
     intent:
-      "I need 2 launch banner illustrations for our product update, each in 16:9 and 1:1, by tomorrow at 6 PM. Budget is $40, with one revision.",
+      "I need 2 launch banner illustrations for our product update, each in 16:9 and 1:1, by tomorrow at 6 PM. Budget is $32, with one revision.",
     sellerId: "quickdraw",
   },
   {

@@ -88,6 +88,8 @@ export interface DealView {
 export interface CreateDealRequest {
   intent: string;
   scenarioId?: string;
+  /** Browser's Date#getTimezoneOffset(), so "tomorrow at 6 PM" resolves in the human's local time. */
+  tzOffsetMinutes?: number;
 }
 export interface CreateDealResponse {
   deal: DealView;

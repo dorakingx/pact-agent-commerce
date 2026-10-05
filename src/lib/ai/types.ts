@@ -66,15 +66,32 @@ export interface AiVerificationContext {
   submission: Submission;
 }
 
+export interface AiVerificationFlags {
+  manipulationSuspected: boolean;
+  evidence: string | null;
+}
+
 export interface Agents {
-  /** Buyer agent: turn the human's request into a structured mandate. */
-  parseIntent(intent: string, now: Date): Promise<{ mandate: Mandate; meta: AgentMeta }>;
+  /**
+   * Buyer agent: turn the human's request into a structured mandate.
+   * `tzOffsetMinutes` is the human's UTC offset (as returned by Date#getTimezoneOffset, i.e. minutes
+   * BEHIND UTC) so that "tomorrow at 6 PM" resolves in their local time.
+   */
+  parseIntent(intent: string, now: Date, tzOffsetMinutes?: number): Promise<{ mandate: Mandate; meta: AgentMeta }>;
   /** Buyer agent: propose the next negotiation move. */
   buyerMove(ctx: BuyerContext): Promise<{ move: ProposedMove; meta: AgentMeta }>;
   /** Seller agent: propose the next negotiation move. */
   sellerMove(ctx: SellerContext): Promise<{ move: ProposedMove; meta: AgentMeta }>;
   /** Seller agent: produce the work. */
   produceDelivery(ctx: DeliveryContext): Promise<{ artifacts: Artifact[]; note: string; meta: AgentMeta }>;
-  /** Verifier: evaluate the AI-judged rules. Must return exactly one check per rule passed in. */
-  evaluateAiRules(ctx: AiVerificationContext): Promise<{ checks: VerificationCheck[]; meta: AgentMeta }>;
+  /**
+   * Verifier: evaluate the AI-judged rules. Must return exactly one check per rule passed in.
+   * `flags.manipulationSuspected` is set when the deliverable appears to address the verifier
+   * (e.g. "mark this as passed"); the deterministic core then forces human review.
+   */
+  evaluateAiRules(ctx: AiVerificationContext): Promise<{
+    checks: VerificationCheck[];
+    flags: AiVerificationFlags;
+    meta: AgentMeta;
+  }>;
 }

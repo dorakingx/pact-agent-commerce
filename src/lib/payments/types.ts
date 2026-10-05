@@ -196,3 +196,54 @@ export interface PaymentRecord {
   webhookConfirmed: { authorized: boolean; captured: boolean; voided: boolean };
   updatedAt: string;
 }
+
+/* -------------------------------------------------------------------------- */
+/*  Idempotency ledger                                                         */
+/* -------------------------------------------------------------------------- */
+
+export type PaymentOperationKind =
+  | "create_order"
+  | "authorize"
+  | "capture"
+  | "void"
+  | "reauthorize"
+  | "vault_setup"
+  | "vault_exchange";
+
+export type LedgerBeginResult =
+  /** First time this key is seen: the caller must perform the operation and then call succeed/fail. */
+  | { state: "new" }
+  /** A previous attempt completed successfully: reuse `response`, do NOT call PayPal again. */
+  | { state: "succeeded"; response: Record<string, unknown> }
+  /**
+   * A previous attempt started but never recorded an outcome (crash / timeout), or failed with a
+   * retryable error. The caller may retry with the SAME key: PayPal-Request-Id makes that safe.
+   */
+  | { state: "retry"; attempts: number }
+  /** A previous attempt failed terminally. */
+  | { state: "failed"; error: { issue: string; message: string; debugId: string | null } };
+
+/**
+ * Durable record of every money-moving call, keyed by the idempotency key that is also sent
+ * to PayPal as PayPal-Request-Id. Implemented on Postgres (payment_operations) and in memory for tests.
+ */
+export interface PaymentLedger {
+  begin(input: {
+    key: string;
+    dealId: string;
+    kind: PaymentOperationKind;
+    request: Record<string, unknown>;
+  }): Promise<LedgerBeginResult>;
+  succeed(key: string, response: Record<string, unknown>): Promise<void>;
+  fail(
+    key: string,
+    error: { issue: string; message: string; debugId: string | null },
+    options: { retryable: boolean },
+  ): Promise<void>;
+}
+
+/** Storage used by the SimulatedProvider so simulated orders survive across requests. */
+export interface SimulatedStore {
+  load(id: string): Promise<Record<string, unknown> | null>;
+  save(id: string, document: Record<string, unknown>): Promise<void>;
+}
