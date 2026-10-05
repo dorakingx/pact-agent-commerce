@@ -187,7 +187,20 @@ export interface OpsPaymentEvent {
   dealCode: string;
   at: string;
   day: string;
-  type: "order_created" | "approved" | "authorized" | "captured" | "voided" | "failed" | "webhook" | "capture_blocked";
+  /** The audit event type without its "payment." prefix: every payment.* event has a row here. */
+  type:
+    | "order_created"
+    | "approved"
+    | "authorized"
+    | "capture_blocked"
+    | "capture_pending"
+    | "captured"
+    | "voided"
+    | "cancelled"
+    | "expired"
+    | "failed"
+    | "webhook"
+    | "reconciled";
   amountMinor: number;
   seller: string;
   provider: ProviderKind | null;

@@ -43,6 +43,7 @@
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "server-only": "^0.0.1",
+    "sharp": "^0.35.5",
     "sonner": "^2.0.8",
     "swr": "^2.5.1",
     "tailwind-merge": "^3.7.0",
@@ -64,7 +65,7 @@
     "typescript": "^5",
     "vitest": "^4.1.11"
   },
-  "description": "PACT \u2014 Programmable Agent Commerce Trust. Contract-aware, fulfillment-gated PayPal settlement for agent-to-agent commerce.",
+  "description": "PACT — Programmable Agent Commerce Trust. Contract-aware, fulfillment-gated PayPal settlement for agent-to-agent commerce.",
   "license": "MIT",
   "engines": {
     "node": "24.x"
