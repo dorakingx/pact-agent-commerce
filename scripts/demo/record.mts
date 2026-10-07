@@ -33,7 +33,11 @@ const OUT = path.resolve(args.get("out") ?? "artifacts/devpost");
 const WORK = path.resolve("artifacts/tmp/demo");
 const VOICE = args.get("voice") ?? "Samantha";
 const SIZE = { width: 1920, height: 1080 };
-/** The page is laid out at 1440x810 and scaled up to 1080p, so text stays legible in the video. */
+/**
+ * The page is laid out at 1440x810 and recorded at that size; the edit scales it up to 1080p, so
+ * text stays legible. (Playwright does not scale a smaller viewport up to a larger video frame —
+ * it pins it to the top-left corner — so the scaling has to happen in ffmpeg.)
+ */
 const VIEWPORT = { width: 1440, height: 810 };
 
 interface Segment {
@@ -197,7 +201,7 @@ async function record(): Promise<string> {
     viewport: VIEWPORT,
     deviceScaleFactor: 1,
     colorScheme: "light",
-    recordVideo: { dir: path.join(WORK, "video"), size: SIZE },
+    recordVideo: { dir: path.join(WORK, "video"), size: VIEWPORT },
   });
   const page = await context.newPage();
   t0 = Date.now();
@@ -384,7 +388,7 @@ function compose(raw: string, voice: number[]): string {
   const delays = NARRATION.map((_, i) => `[${i + 1}:a]adelay=${Math.round((sceneStart[i] + 0.35) * 1000)}:all=1[a${i}]`);
   const filter = [
     ...parts,
-    `${labels.join("")}concat=n=${labels.length}:v=1:a=0,fps=30,format=yuv420p[v]`,
+    `${labels.join("")}concat=n=${labels.length}:v=1:a=0,crop=${VIEWPORT.width}:${VIEWPORT.height}:0:0,scale=${SIZE.width}:${SIZE.height}:flags=lanczos,setsar=1,fps=30,format=yuv420p[v]`,
     ...delays,
     `${NARRATION.map((_, i) => `[a${i}]`).join("")}amix=inputs=${NARRATION.length}:normalize=0,apad[a]`,
   ].join(";");
