@@ -135,9 +135,18 @@ export const payments = pgTable(
     webhookConfirmed: jsonb("webhook_confirmed")
       .$type<{ authorized: boolean; captured: boolean; voided: boolean }>()
       .notNull(),
+    /**
+     * Owner key of the delegated wallet this payment is reserved against, or null when the payer
+     * approves in PayPal. Written once with the reservation; it is what a wallet-wide total sums on.
+     */
+    walletOwner: text("wallet_owner"),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
-  (t) => [uniqueIndex("payments_order_idx").on(t.orderId), index("payments_auth_idx").on(t.authorizationId)],
+  (t) => [
+    uniqueIndex("payments_order_idx").on(t.orderId),
+    index("payments_auth_idx").on(t.authorizationId),
+    index("payments_wallet_owner_idx").on(t.walletOwner),
+  ],
 );
 
 /**

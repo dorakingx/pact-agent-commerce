@@ -319,8 +319,15 @@ export type PolicyEvaluation = z.infer<typeof PolicyEvaluationSchema>;
 /*  Delivery                                                                   */
 /* -------------------------------------------------------------------------- */
 
+/**
+ * An artifact id is chosen by whoever delivers. It addresses the download route, attributes
+ * verification checks and travels into the verifier's prompt, so it is an identifier and nothing
+ * else: no spaces, no line breaks, no room for a sentence.
+ */
+export const ArtifactIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "must be 1-64 letters, digits, underscores or hyphens");
+
 export const IllustrationArtifactSchema = z.object({
-  id: z.string(),
+  id: ArtifactIdSchema,
   kind: z.literal("illustration"),
   /** 1-based index of the illustration this file is a variant of. */
   index: z.number().int().min(1),
@@ -338,7 +345,7 @@ export const IllustrationArtifactSchema = z.object({
 export type IllustrationArtifact = z.infer<typeof IllustrationArtifactSchema>;
 
 export const CopyArtifactSchema = z.object({
-  id: z.string(),
+  id: ArtifactIdSchema,
   kind: z.literal("copy"),
   /** 1-based index of the copy piece this text is a language variant of. */
   index: z.number().int().min(1),
@@ -357,7 +364,17 @@ export const SubmissionSchema = z.object({
   dealId: z.string(),
   /** 1 = first delivery, 2 = first revision, ... */
   round: z.number().int().min(1),
-  artifacts: z.array(ArtifactSchema).max(48),
+  artifacts: z
+    .array(ArtifactSchema)
+    .max(48)
+    // One id, one file: a check or a download that names an id must mean exactly one artifact.
+    .superRefine((artifacts, ctx) => {
+      const seen = new Set<string>();
+      artifacts.forEach((artifact, position) => {
+        if (seen.has(artifact.id)) ctx.addIssue({ code: "custom", message: "artifact ids must be unique within a submission", path: [position, "id"] });
+        seen.add(artifact.id);
+      });
+    }),
   /** Seller's delivery note. Untrusted text. */
   note: z.string().max(600),
   source: AgentSourceSchema,

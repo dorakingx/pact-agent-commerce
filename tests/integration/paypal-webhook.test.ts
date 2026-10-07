@@ -18,6 +18,7 @@ import {
   SUBSCRIBED_EVENT_TYPES,
   applyWebhookEffect,
   interpretWebhookEvent,
+  storedWebhookPayload,
   type WebhookApplication,
   type WebhookEffect,
 } from "@/lib/payments/webhook";
@@ -357,12 +358,64 @@ describe("verifyWebhook — postback fallback", () => {
     await expect(provider.verifyWebhook(sign(RAW_BODY), RAW_BODY)).resolves.toMatchObject({ verified: true, method: "postback" });
   });
 
-  it("uses the postback for a signature algorithm it cannot check locally, passing the algorithm on", async () => {
+  it("refuses a signature algorithm PayPal does not use, without fetching or asking anything", async () => {
     net.certificate = () => new Response(certificatePem, { status: 200 });
-    await expect(provider.verifyWebhook(sign(RAW_BODY, { authAlgo: "SHA512withRSA" }), RAW_BODY)).resolves.toMatchObject({ method: "postback" });
-    expect(net.log.some((entry) => entry.url === CERT_URL)).toBe(false);
-    const postback = net.log.find((entry) => entry.url === `${API}${VERIFY_PATH}`);
-    expect(JSON.parse(postback?.body ?? "null")).toMatchObject({ auth_algo: "SHA512withRSA" });
+    await expect(provider.verifyWebhook(sign(RAW_BODY, { authAlgo: "SHA512withRSA" }), RAW_BODY)).resolves.toEqual({
+      verified: false,
+      method: "self",
+      reason: "unsupported_auth_algo",
+    });
+    expect(net.log).toEqual([]);
+  });
+
+  it("does not fetch a certificate URL again for a while after it failed", async () => {
+    const certFetches = (): number => net.log.filter((entry) => entry.url === CERT_URL).length;
+    for (let delivery = 0; delivery < 4; delivery += 1) await provider.verifyWebhook(sign(RAW_BODY), RAW_BODY);
+    expect(certFetches()).toBe(1);
+
+    // Once the certificate store is back and the failure has aged out, the key is fetched and cached.
+    net.certificate = () => new Response(certificatePem, { status: 200 });
+    let clock = NOW;
+    const later = new PayPalSandboxProvider({
+      clientId: "sandbox-client-id",
+      clientSecret: "sandbox-client-secret",
+      apiBase: API,
+      webhookId: WEBHOOK_ID,
+      fetchImpl: net.fetch,
+      now: () => clock,
+      sleep: async () => {},
+    });
+    net.certificate = () => new Response("certificate store unavailable", { status: 503 });
+    await later.verifyWebhook(sign(RAW_BODY), RAW_BODY);
+    net.certificate = () => new Response(certificatePem, { status: 200 });
+    await expect(later.verifyWebhook(sign(RAW_BODY), RAW_BODY)).resolves.toMatchObject({ method: "postback" });
+    clock += 5 * MINUTE_MS + 1000;
+    const fresh = sign(RAW_BODY, { transmissionTime: new Date(clock).toISOString() });
+    await expect(later.verifyWebhook(fresh, RAW_BODY)).resolves.toEqual({ verified: true, method: "self", reason: null });
+  });
+
+  it("makes no outbound call the caller's budget does not allow: forged deliveries cannot be turned into PayPal traffic", async () => {
+    let asked = 0;
+    const refuseAll = { mayCallOut: async () => ((asked += 1), false) };
+    for (let delivery = 0; delivery < 10; delivery += 1) {
+      const certUrl = `https://api.sandbox.paypal.com/v1/notifications/certs/CERT-FORGED-${delivery}`;
+      await expect(provider.verifyWebhook(sign(RAW_BODY, { certUrl }), RAW_BODY, refuseAll)).resolves.toEqual({
+        verified: false,
+        method: "postback",
+        reason: "verification_budget_spent",
+      });
+    }
+    expect(net.log).toEqual([]);
+    expect(asked).toBe(20);
+  });
+
+  it("verifies from the cached key without spending the budget", async () => {
+    net.certificate = () => new Response(certificatePem, { status: 200 });
+    await expect(provider.verifyWebhook(sign(RAW_BODY), RAW_BODY)).resolves.toMatchObject({ verified: true, method: "self" });
+    let asked = 0;
+    const refuseAll = { mayCallOut: async () => ((asked += 1), false) };
+    await expect(provider.verifyWebhook(sign(RAW_BODY), RAW_BODY, refuseAll)).resolves.toMatchObject({ verified: true, method: "self" });
+    expect(asked).toBe(0);
   });
 
   it("still applies the cert-host and replay checks before falling back", async () => {
@@ -436,6 +489,8 @@ describe("interpretWebhookEvent", () => {
       amountMinor: 9000,
       customId: CUSTOM_ID,
       invoiceId: "ctr_webhook000001",
+      resourceStatus: "APPROVED",
+      expiresAt: null,
     });
   });
 
@@ -454,6 +509,9 @@ describe("interpretWebhookEvent", () => {
       amountMinor: 9000,
       customId: CUSTOM_ID,
       invoiceId: "ctr_webhook000001",
+      // The authorization's own status and expiry: an event about one that is still PENDING holds nothing.
+      resourceStatus: "CREATED",
+      expiresAt: "2026-11-04T12:00:00.000Z",
     });
   });
 
@@ -474,6 +532,8 @@ describe("interpretWebhookEvent", () => {
       amountMinor: 9000,
       customId: CUSTOM_ID,
       invoiceId: "ctr_webhook000001",
+      resourceStatus: null,
+      expiresAt: null,
     });
   });
 
@@ -585,6 +645,42 @@ const captureRefunded = () =>
     links: [{ href: `${API}/v2/payments/captures/${CAPTURE_ID}`, rel: "up" }],
   });
 
+describe("storedWebhookPayload", () => {
+  it("keeps what interpretation reads and drops the payer's identity", () => {
+    const stored = storedWebhookPayload(
+      event("CHECKOUT.ORDER.APPROVED", {
+        id: ORDER_ID,
+        status: "APPROVED",
+        intent: "AUTHORIZE",
+        payer: { name: { given_name: "John", surname: "Doe" }, email_address: "sb-buyer4711@personal.example.com", payer_id: "QYR5Z8XDVJNXQ" },
+        payment_source: { paypal: { email_address: "sb-buyer4711@personal.example.com" } },
+        purchase_units: [{ amount: AMOUNT, custom_id: CUSTOM_ID, invoice_id: "ctr_webhook000001", shipping: { name: { full_name: "John Doe" } } }],
+        links: [{ rel: "self", href: `${API}/v2/checkout/orders/${ORDER_ID}`, method: "GET" }],
+      }),
+    );
+    expect(JSON.stringify(stored)).not.toMatch(/payer|email_address|John|Doe|QYR5Z8XDVJNXQ|@/);
+    expect(stored).toEqual({
+      id: "WH-CHECKOUT.ORDER.APPROVED",
+      event_type: "CHECKOUT.ORDER.APPROVED",
+      resource_type: "test",
+      create_time: "2026-10-06T11:59:55.000Z",
+      resource: {
+        id: ORDER_ID,
+        status: "APPROVED",
+        purchase_units: [{ amount: AMOUNT, custom_id: CUSTOM_ID, invoice_id: "ctr_webhook000001" }],
+        links: [{ rel: "self", href: `${API}/v2/checkout/orders/${ORDER_ID}` }],
+      },
+    });
+    // The projection is enough to interpret the event again.
+    expect(interpretWebhookEvent(stored)).toMatchObject({ kind: "approved", orderId: ORDER_ID, amountMinor: 9000, customId: CUSTOM_ID });
+  });
+
+  it("stores nothing of a body that is not an event", () => {
+    expect(storedWebhookPayload("not an object")).toEqual({});
+    expect(storedWebhookPayload({ id: "WH-1", event_type: "X", resource: "a string" })).toMatchObject({ id: "WH-1", resource: null });
+  });
+});
+
 describe("applyWebhookEffect", () => {
   it("ignores an ignored effect", () => {
     const record = payment("authorized");
@@ -637,6 +733,48 @@ describe("applyWebhookEffect", () => {
       });
       expect(types(result)).toEqual(["payment.webhook", "payment.authorized"]);
       expect(result.events[1].title).toBe("PayPal authorized $90.00 — the funds are held, not captured");
+    });
+
+    it("records when the hold lapses, so a webhook-adopted authorization has an expiry like any other", () => {
+      const result = apply(payment("created"), authorizationCreated());
+      expect(result.payment).toMatchObject({ status: "authorized", authorizationExpiresAt: "2026-11-04T12:00:00.000Z" });
+    });
+
+    it("does not record a hold for an authorization that is still under review", () => {
+      const pending = effectOf("PAYMENT.AUTHORIZATION.CREATED", { ...authorizationResource, status: "PENDING" });
+      for (const status of ["created", "approved"] as const) {
+        const result = apply(payment(status), pending);
+        expect(result).toMatchObject({ changed: false, payment: { status, authorizationId: null, authorizedMinor: 0 } });
+        expect(types(result)).toEqual(["payment.webhook"]);
+        expect(result.events[0].title).toContain("no funds are held yet");
+        expect(result.events[0].data).not.toHaveProperty("mismatch");
+      }
+    });
+
+    it("does not record a hold for an authorization PayPal denied or voided", () => {
+      for (const status of ["DENIED", "VOIDED"]) {
+        const result = apply(payment("approved"), effectOf("PAYMENT.AUTHORIZATION.CREATED", { ...authorizationResource, status }));
+        expect(result).toMatchObject({ changed: false, payment: { status: "approved", authorizationId: null } });
+        expect(result.events[0].data).toMatchObject({ mismatch: true });
+      }
+    });
+
+    it("treats a payload without a status as the held authorization it has always described", () => {
+      const withoutStatus: Record<string, unknown> = { ...authorizationResource };
+      delete withoutStatus.status;
+      expect(apply(payment("approved"), effectOf("PAYMENT.AUTHORIZATION.CREATED", withoutStatus)).payment.status).toBe("authorized");
+    });
+
+    it("adopts the authorization of an order PACT holds no id for, but only when the caller vouches for the contract binding", () => {
+      const reservation = payment("none");
+      const unbound = apply(reservation, authorizationCreated());
+      expect(unbound).toMatchObject({ changed: false, payment: { status: "none" } });
+
+      const result = applyWebhookEffect(reservation, authorizationCreated(), LATER, { boundToContract: true });
+      expect(result.payment).toMatchObject({ status: "authorized", orderId: ORDER_ID, authorizationId: AUTHORIZATION_ID, authorizedMinor: 9000 });
+      // Ids that disagree are never overridden by the binding.
+      const other = payment("created", { orderId: "SOME-OTHER-ORDER" });
+      expect(applyWebhookEffect(other, authorizationCreated(), LATER, { boundToContract: true })).toMatchObject({ changed: false });
     });
 
     it("does not advance when the authorized amount differs from the contract price", () => {

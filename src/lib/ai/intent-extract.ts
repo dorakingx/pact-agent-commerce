@@ -93,12 +93,15 @@ function isWord(token: Token): boolean {
  * acceptable-use policy forbids, so this errs towards blocking.
  */
 const RESTRICTED_PATTERNS: readonly RegExp[] = [
-  /\b(?:weapons?|firearms?|guns?|rifles?|ammunition|explosives?|grenades?|bomb[- ]making)\b/,
-  /\b(?:gambling|casinos?|sportsbooks?|slot machines?)\b/,
+  /\b(?:weapons?|firearms?|guns?|handguns?|pistols?|revolvers?|shotguns?|rifles?|ammunition|explosives?|grenades?|bomb[- ]making)\b/,
+  /\b(?:gambling|casinos?|sportsbooks?|bookmakers?|slot machines?|poker|roulette|blackjack|lotter(?:y|ies)|betting|wager(?:s|ing)?)\b/,
+  // "bet" alone is everyday English ("you bet"); with these words in front of it, it is a wager.
+  /\b(?:free|sports?|place (?:a|your)|placing) bets?\b/,
   /\b(?:adult (?:content|videos?|sites?|entertainment|material)|porn\w*|nsfw|sexually explicit|escort services?)\b/,
-  /\b(?:drugs|narcotics|cocaine|heroin|methamphetamine|fentanyl)\b/,
-  /\b(?:counterfeit\w*|fake ids?|fake passports?|forged (?:documents?|ids?|passports?)|stolen)\b/,
-  /\b(?:malware|ransomware|spyware|keyloggers?)\b/,
+  /\b(?:drugs|narcotics|cocaine|heroin|methamphetamine|fentanyl|cannabis|marijuana|thc|vap(?:e|es|ing)|vape pens?)\b/,
+  /\b(?:counterfeit\w*|knock-?offs?|fake ids?|fake passports?|forged (?:documents?|ids?|passports?)|stolen)\b/,
+  /\breplica (?:watch(?:es)?|handbags?|bags?|purses?|sneakers?|jerseys?|rolex(?:es)?|designer)\b/,
+  /\b(?:malware|ransomware|spyware|keyloggers?|phishing|ddos|botnets?)\b/,
   /\bhack(?:ing)?\s+(?:into\b|someone|somebody|(?:an?|my|his|her|their)\s+[\w']+\s+(?:account|phone|email|computer))/,
 ];
 
@@ -213,6 +216,28 @@ function readBudget(lower: string): { minor: number | null; spans: Span[] } {
   const ceilings = mentions.filter((m) => m.ceiling);
   const pool = ceilings.length > 0 ? ceilings : mentions;
   return { minor: Math.min(...pool.map((m) => m.minor)), spans: mentions.map((m) => m.span) };
+}
+
+/**
+ * An amount in a currency PACT does not settle in: a symbol or code attached to a number.
+ * ("pound" is left out on purpose — it is also a weight.)
+ */
+const FOREIGN_AMOUNT_PATTERNS: readonly RegExp[] = [
+  /[\u20ac\u00a3\u00a5]\s?\d/,
+  /\d[\d.,]*\s?(?:[\u20ac\u00a3\u00a5\u5186]|(?:eur|euros?|gbp|yen|jpy)\b)/,
+  /\b(?:eur|gbp|jpy)\s?\d/,
+];
+
+/**
+ * True when the request prices the job in another currency and names no US-dollar amount.
+ *
+ * Such a budget has no deterministic reading: the figure would either be dropped (and the
+ * default ceiling used) or converted by a model at a rate nobody chose. Neither is "the budget
+ * the human stated", so intake asks for dollars instead of guessing.
+ */
+export function statesOnlyForeignBudget(intent: string): boolean {
+  const { lower } = prepare(intent);
+  return FOREIGN_AMOUNT_PATTERNS.some((pattern) => pattern.test(lower)) && moneyMentions(lower).length === 0;
 }
 
 /* -------------------------------------------------------------------------- */

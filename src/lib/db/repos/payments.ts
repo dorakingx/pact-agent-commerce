@@ -111,6 +111,28 @@ export function getPayment(
   });
 }
 
+/**
+ * The wallet a deal's payment is reserved against: `{ walletOwner: null }` for a payment the
+ * payer approves in PayPal, null when the deal has no payment row yet.
+ */
+export function getPaymentFunding(db: Db, dealId: string): Promise<{ walletOwner: string | null } | null> {
+  return dbCall("getPaymentFunding", async () => {
+    const [row] = await db.select({ walletOwner: payments.walletOwner }).from(payments).where(eq(payments.dealId, dealId)).limit(1);
+    return row ?? null;
+  });
+}
+
+/**
+ * Record (or clear, with null) the wallet a payment is reserved against. Kept apart from
+ * `upsertPayment` on purpose: the payment record is rewritten by every step, the funding
+ * decision is made once and must survive those rewrites.
+ */
+export function setPaymentFunding(db: Db, dealId: string, walletOwner: string | null): Promise<void> {
+  return dbCall("setPaymentFunding", async () => {
+    await db.update(payments).set({ walletOwner }).where(eq(payments.dealId, dealId));
+  });
+}
+
 type PayPalIdColumn = typeof payments.orderId | typeof payments.authorizationId | typeof payments.captureId;
 
 async function findDealId(db: Db, column: PayPalIdColumn, value: string): Promise<string | null> {

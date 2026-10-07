@@ -113,14 +113,23 @@ export function paymentErrorFromResponse(response: PayPalResponse): PaymentError
   });
 }
 
-/** A 2xx answer that lacks the fields PACT needs. Not retried: asking again would not change the shape. */
+/**
+ * A 2xx answer that lacks the fields PACT needs.
+ *
+ * PayPal accepted the request, so this is "the outcome is not known", never "PayPal refused":
+ * an authorization or a capture may exist behind an answer PACT could not read. It is therefore
+ * marked retryable — the ledger keeps the operation's key open, the payment record stays where
+ * it was, and the next attempt re-reads PayPal's state (and adopts what it finds) instead of the
+ * step being booked as a terminal failure with "nothing is held". Nothing is resent because of
+ * it at the HTTP level: the shape is checked after the transport has returned.
+ */
 export function unexpectedResponse(what: string, response: PayPalResponse): PaymentError {
   return new PaymentError({
     issue: "UNEXPECTED_RESPONSE",
     message: `PayPal's ${what} response did not have the expected shape`,
     httpStatus: response.status,
     debugId: response.debugId,
-    retryable: false,
+    retryable: true,
   });
 }
 

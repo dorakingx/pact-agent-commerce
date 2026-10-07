@@ -24,6 +24,7 @@ import {
   type VaultSetupInfo,
   type VaultTokenInfo,
   type WebhookVerification,
+  type WebhookVerifyOptions,
 } from "./types";
 import {
   CertificateCache,
@@ -211,6 +212,7 @@ export class PayPalSandboxProvider implements PaymentProvider {
     this.certificates = new CertificateCache({
       fetchImpl: options.fetchImpl ?? ((input, init) => fetch(input, init)),
       timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+      now: this.now,
     });
   }
 
@@ -279,10 +281,16 @@ export class PayPalSandboxProvider implements PaymentProvider {
     return order.authorization === null ? this.getOrder(orderId) : order;
   }
 
-  /** Orders answered in PayPal's minimal form (no purchase units) are completed with a GET. */
+  /**
+   * Orders answered in PayPal's minimal form are completed with a GET. "Minimal" is not always
+   * empty: without the full representation, an authorize (and a create against a vaulted wallet)
+   * answers with a purchase unit that holds only `reference_id` and `payments` — no amount and
+   * no custom_id. The POST succeeded and the order id is known, so reading the order back is
+   * always the safe completion; failing here would book a held authorization as a refusal.
+   */
   private async completeOrder(response: PayPalResponse, what: string, context: Record<string, string>): Promise<OrderInfo> {
     const wire = parseWire(WireOrderSchema, what, response);
-    if (wire.purchase_units && wire.purchase_units.length > 0) return toOrderInfo(wire, what, response);
+    if (wire.purchase_units?.[0]?.amount) return toOrderInfo(wire, what, response);
     return this.fetchOrder(wire.id, context);
   }
 
@@ -421,7 +429,13 @@ export class PayPalSandboxProvider implements PaymentProvider {
 
   /* ------------------------------ Webhooks v1 ----------------------------- */
 
-  async verifyWebhook(headers: Headers, rawBody: string): Promise<WebhookVerification> {
+  /**
+   * Nothing in a delivery is trusted before its signature verifies, and that includes what it
+   * costs to check: every outbound call below is first cleared with `options.mayCallOut`, a
+   * certificate URL that failed is not fetched again for a while, and a signature in an
+   * algorithm PayPal does not use is refused outright instead of being sent to PayPal to judge.
+   */
+  async verifyWebhook(headers: Headers, rawBody: string, options: WebhookVerifyOptions = {}): Promise<WebhookVerification> {
     const webhookId = this.webhookId;
     if (!webhookId) return { verified: false, method: "none", reason: "webhook_id_not_configured" };
     const signature = readSignatureHeaders(headers);
@@ -430,14 +444,21 @@ export class PayPalSandboxProvider implements PaymentProvider {
     if (!isTrustedCertUrl(signature.certUrl)) return { verified: false, method: "self", reason: "untrusted_cert_url" };
     const timeProblem = transmissionTimeProblem(signature.transmissionTime, this.now());
     if (timeProblem !== null) return { verified: false, method: "self", reason: timeProblem };
+    // PayPal signs with one algorithm. Naming another is not a reason to ask PayPal about it.
+    if (signature.authAlgo !== null && signature.authAlgo !== SUPPORTED_AUTH_ALGO) {
+      return { verified: false, method: "self", reason: "unsupported_auth_algo" };
+    }
 
-    const locallyVerifiable = signature.authAlgo === null || signature.authAlgo === SUPPORTED_AUTH_ALGO;
-    const key = locallyVerifiable ? await this.certificates.load(signature.certUrl) : null;
+    const mayCallOut = options.mayCallOut ?? (async () => true);
+    const key = await this.certificates.load(signature.certUrl, mayCallOut);
     if (key !== null) {
       const verified = verifySignature(key, signedMessage(signature, webhookId, rawBody), signature.signature);
       return { verified, method: "self", reason: verified ? null : "signature_mismatch" };
     }
     // The certificate could not be obtained, so the signature was never checked: ask PayPal instead.
+    if (!isJsonObject(rawBody)) return { verified: false, method: "postback", reason: "body_not_json" };
+    // "Not now" rather than "no": PayPal redelivers, and a genuine event verifies once there is room again.
+    if (!(await mayCallOut())) return { verified: false, method: "postback", reason: "verification_budget_spent" };
     return this.verifyByPostback(signature, webhookId, rawBody);
   }
 
@@ -446,7 +467,6 @@ export class PayPalSandboxProvider implements PaymentProvider {
     webhookId: string,
     rawBody: string,
   ): Promise<WebhookVerification> {
-    if (!isJsonObject(rawBody)) return { verified: false, method: "postback", reason: "body_not_json" };
     const envelope = JSON.stringify({
       auth_algo: signature.authAlgo ?? SUPPORTED_AUTH_ALGO,
       cert_url: signature.certUrl,

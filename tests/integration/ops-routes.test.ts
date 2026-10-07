@@ -264,6 +264,8 @@ describe("GET /api/health and system status with a healthy database", () => {
     vi.stubEnv("PAYPAL_CLIENT_ID", "AZ-sandbox-client-id");
     vi.stubEnv("PAYPAL_CLIENT_SECRET", "EL-sandbox-client-secret");
     vi.stubEnv("PAYPAL_WEBHOOK_ID", "WH-0000000000");
+    // Real PayPal on an in-memory database is reported as degraded; this test is about the wallet only.
+    vi.stubEnv("PGLITE_DIR", ".pact-data/test");
     const status = await getSystemStatus({ openDb: async () => db });
     expect(status.payments).toEqual({ provider: "paypal_sandbox", configured: true, webhooks: true, delegatedWallet: false });
     expect(status).not.toHaveProperty("degraded");

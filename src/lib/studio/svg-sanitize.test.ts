@@ -146,6 +146,18 @@ describe("sanitizeSvg — classic attack vectors", () => {
     expect(svg).toBe(`<svg ${NS}><rect width="1" height="1"/><circle r="1" fill="url(#g)" stroke="URL( #h )"/></svg>`);
   });
 
+  it("drops presentation attributes that name an external image without url(): image-set() and friends", () => {
+    // Chromium parses mask as CSS and fetches the image when the saved file is opened from disk.
+    const svg = clean(
+      '<svg><rect width="1" height="1" mask="image-set(\'https://tracker.example/p.png\' 1x)" ' +
+        'clip-path="-webkit-image-set(\'https://tracker.example/q.png\' 1x)" filter="IMAGE-SET( \'//tracker.example/r.png\' 1x )" ' +
+        'fill="image(\'https://tracker.example/s.png\')" stroke="cross-fade(url(#a), \'https://tracker.example/t.png\')"/>' +
+        '<circle r="1" mask="element(#x)" fill="paint(worklet)"/><ellipse rx="1" ry="1" mask="url(#m)" filter="url(#f)"/></svg>',
+    );
+    expect(svg).toBe(`<svg ${NS}><rect width="1" height="1"/><circle r="1"/><ellipse rx="1" ry="1" mask="url(#m)" filter="url(#f)"/></svg>`);
+    expect(svg).not.toContain("tracker.example");
+  });
+
   it("defuses entity expansion (billion laughs): the DTD is dropped and custom entities resolve to nothing", () => {
     const bomb =
       '<?xml version="1.0"?><!DOCTYPE svg [<!ENTITY lol "lol"><!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">' +

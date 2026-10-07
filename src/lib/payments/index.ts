@@ -69,6 +69,7 @@ export {
   SUBSCRIBED_EVENT_TYPES,
   applyWebhookEffect,
   interpretWebhookEvent,
+  storedWebhookPayload,
   type WebhookApplication,
   type WebhookEffect,
 } from "./webhook";

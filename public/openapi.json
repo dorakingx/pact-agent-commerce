@@ -60,7 +60,7 @@
           "Deals"
         ],
         "summary": "Create a deal from a request in words",
-        "description": "Derives the mandate, matches a seller agent and starts the negotiation. Creates the anonymous session if there is none. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 8 per session per 10 minutes, 40 per network address per hour.",
+        "description": "Derives the mandate, matches a seller agent and starts the negotiation. A request whose budget is stated only in a currency other than US dollars is refused (400): PACT settles in USD and does not guess a conversion. Creates the anonymous session if there is none. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 8 per session per 10 minutes, 40 per network address per hour.",
         "requestBody": {
           "required": true,
           "content": {
@@ -467,7 +467,7 @@
           "Operations"
         ],
         "summary": "Compare PACT's ledger with the provider's record of the deal",
-        "description": "Re-reads the order and authorization from the payment provider and compares them field by field with PACT's ledger. The verdict is deterministic. With PayPal Sandbox and AI enabled, a read-only auditor agent (PayPal Agent Toolkit, `get_order` only) adds a short statement; if it fails, the facts are returned alone. Changes no payment and no status. Anyone who can read the deal may call it; only the owner's call is written to the audit trail (`payment.reconciled`). State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limit: 12 per session (or network address) per 10 minutes.",
+        "description": "Re-reads the order and authorization from the payment provider and compares them field by field with PACT's ledger. The verdict is deterministic. With PayPal Sandbox and AI enabled, a read-only auditor agent (PayPal Agent Toolkit, `get_order` only) adds a short statement; if it fails, the facts are returned alone. Changes no payment and no status. Anyone who can read the deal may call it; only the owner's call is written to the audit trail (`payment.reconciled`). State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 12 per session (or network address) per 10 minutes and, for callers with a session, 36 per network address per 10 minutes. The agent's statement is additionally budgeted for the whole deployment (120 per hour); beyond it the facts are returned alone.",
         "security": [
           {
             "session": []
@@ -620,7 +620,7 @@
           "Policy"
         ],
         "summary": "Replace the session's spending policy",
-        "description": "Applies to this session only and only to what happens next: a signed contract keeps the thresholds it was signed with. Creates the session if there is none. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limit: 30 per session per 10 minutes.",
+        "description": "Applies to this session only and only to what happens next: a signed contract keeps the thresholds it was signed with. Creates the session if there is none. State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 30 per session per 10 minutes, 120 per network address per hour.",
         "requestBody": {
           "required": true,
           "content": {
@@ -793,7 +793,7 @@
           "Wallet"
         ],
         "summary": "Start connecting a delegated wallet",
-        "description": "Asks the provider for a vault setup token, stores it server-side as a pending connection and returns where the payer gives consent. Creates the session if there is none. Scope `demo` requires the operator token and binds the connection to the calling session. A connected wallet must be disconnected before another is connected (409). State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 10 per session per 10 minutes; 20 attempts on scope `demo` per network address per 10 minutes.",
+        "description": "Asks the provider for a vault setup token, stores it server-side as a pending connection and returns where the payer gives consent. Creates the session if there is none. Scope `demo` requires the operator token and binds the connection to the calling session. A connected wallet must be disconnected before another is connected (409). State-changing: must be same-origin (Origin / Sec-Fetch-Site are checked). Limits: 10 per session per 10 minutes and 30 per network address per hour; 20 attempts on scope `demo` per network address per 10 minutes.",
         "security": [
           {},
           {
@@ -1227,6 +1227,255 @@
           }
         }
       }
+    },
+    "/api/cron/sweep": {
+      "get": {
+        "operationId": "sweepStalledDeals",
+        "tags": [
+          "System"
+        ],
+        "summary": "Settle deals nobody is advancing",
+        "description": "For a scheduler, not for browsers. Runs the next automatic step of deals that hold money (authorized, revision required, submitted, verified, rejecting) and have not changed for two minutes: verification and capture, or the release of a rejected delivery's hold, do not depend on the payer's browser staying open. One step per deal, a few deals per call, through the same lease and idempotency keys as `POST /api/deals/{id}/advance`. Never touches a deal before authorization or at a human gate.",
+        "security": [
+          {
+            "cronSecret": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "What the run did.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "examined",
+                    "advanced"
+                  ],
+                  "properties": {
+                    "examined": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "description": "Stalled deals found for this run."
+                    },
+                    "advanced": {
+                      "type": "array",
+                      "description": "The deals a step was attempted for.",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "dealId",
+                          "executed",
+                          "status"
+                        ],
+                        "properties": {
+                          "dealId": {
+                            "type": "string"
+                          },
+                          "executed": {
+                            "description": "The step that ran to completion, or null when it stalled (the deal's `lastError` says why).",
+                            "oneOf": [
+                              {
+                                "$ref": "#/components/schemas/StepKind"
+                              },
+                              {
+                                "type": "null"
+                              }
+                            ]
+                          },
+                          "status": {
+                            "$ref": "#/components/schemas/DealStatus"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      }
+    },
+    "/api/ops/ai": {
+      "get": {
+        "operationId": "getOpsAiStatus",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Whether the dashboard agents can run here",
+        "description": "Reports whether the Operations dashboard's AI agents are available on this deployment and which models they may use. Starts no session and calls no model.",
+        "security": [
+          {}
+        ],
+        "responses": {
+          "200": {
+            "description": "The availability.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store"
+                }
+              },
+              "x-request-id": {
+                "schema": {
+                  "type": "string",
+                  "format": "uuid"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "available",
+                    "reason",
+                    "message",
+                    "models",
+                    "defaultModel"
+                  ],
+                  "properties": {
+                    "available": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "oneOf": [
+                        {
+                          "enum": [
+                            "scripted",
+                            "no_credentials"
+                          ]
+                        },
+                        {
+                          "type": "null"
+                        }
+                      ]
+                    },
+                    "message": {
+                      "type": [
+                        "string",
+                        "null"
+                      ],
+                      "description": "One sentence for the visitor when `available` is false."
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "required": [
+                          "id",
+                          "label"
+                        ],
+                        "properties": {
+                          "id": {
+                            "type": "string"
+                          },
+                          "label": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "defaultModel": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          }
+        }
+      },
+      "post": {
+        "operationId": "proxyOpsAi",
+        "tags": [
+          "Operations"
+        ],
+        "summary": "Model proxy for the dashboard agents",
+        "description": "Accepts an OpenAI Responses-format request from the Operations dashboard, rebuilds it from an allow-list of fields and forwards it to the AI Gateway with PACT's own credentials. Only the allowed models are ever called, output is capped, and the caller is rate-limited per session and per network address. The provider's answer (JSON, or a server-sent event stream when `stream` is true) is passed straight back. May start a session.",
+        "security": [
+          {
+            "session": []
+          },
+          {}
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "description": "An OpenAI Responses-format request. Fields outside the allow-list are dropped."
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The provider's answer, unchanged.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "const": "no-store, no-transform"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/InvalidRequest"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "429": {
+            "$ref": "#/components/responses/RateLimited"
+          },
+          "500": {
+            "$ref": "#/components/responses/Internal"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1242,6 +1491,11 @@
         "in": "header",
         "name": "x-admin-token",
         "description": "Operator token for the shared demo wallet. Compared in constant time; rejected when none is configured."
+      },
+      "cronSecret": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The deployment's CRON_SECRET, sent by the scheduler as `Authorization: Bearer <secret>` (what Vercel Cron does). Compared in constant time; the endpoint answers 404 while no secret is configured."
       }
     },
     "responses": {
@@ -1392,6 +1646,29 @@
       },
       "Internal": {
         "description": "Unexpected failure (`internal`). Details are logged under the request id, never returned.",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store"
+            }
+          },
+          "x-request-id": {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ApiErrorBody"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "A dependency this request needs is switched off or did not answer (`unavailable`).",
         "headers": {
           "Cache-Control": {
             "schema": {

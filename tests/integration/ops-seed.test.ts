@@ -3,14 +3,14 @@
  * simulator: every planned request must end where its scenario is meant to end, and what it
  * leaves behind must be an honest operations ledger.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createAgents } from "@/lib/ai";
 import { parseIntentScripted } from "@/lib/ai/intent";
 import { closeDb, createDbSimulatedStore, createTestDb, loadDealGraphs, type Db } from "@/lib/db";
 import { verifyAuditChain } from "@/lib/domain/audit";
 import { SCENARIOS, type ScenarioId } from "@/lib/domain/scenarios";
 import { getSeller } from "@/lib/domain/sellers";
-import { SimulatedProvider, type PaymentProvider } from "@/lib/payments";
+import { PaymentError, SimulatedProvider, type PaymentProvider } from "@/lib/payments";
 import { reconcileWithPayPal } from "@/lib/services/auditor";
 import type { ServiceContext } from "@/lib/services/context";
 import { DEMO_WALLET_OWNER, advanceDeal, approveSimulatedOrder, createDeal, decideDeal, getDealView } from "@/lib/services/deals";
@@ -281,6 +281,36 @@ describe("seeding: gates and failures", () => {
       expect(notCreated).toMatchObject({ ok: false, status: null, code: null, dealId: null, reconciliation: null });
       expect(notCreated.problem).toEqual(expect.any(String));
       expect(formatResults([notCreated]).split("\n")[2]).toContain("not created");
+    } finally {
+      await closeDb(ctx.db);
+    }
+  });
+
+  it("waits between retries of a stalled payment step instead of burning the engine's attempts", async () => {
+    const ctx = await testContext();
+    try {
+      // PayPal's capture is unreachable for the first three calls — a short blip — and fine afterwards.
+      // (Spied on in place: the simulator's approval step needs the simulator itself as the provider.)
+      const capture = ctx.provider.captureAuthorization.bind(ctx.provider);
+      let captureCalls = 0;
+      vi.spyOn(ctx.provider, "captureAuthorization").mockImplementation(async (input) => {
+        captureCalls += 1;
+        if (captureCalls <= 3) throw new PaymentError({ issue: "NETWORK_ERROR", message: "PayPal could not be reached", retryable: true });
+        return capture(input);
+      });
+      const flaky = ctx;
+      const startedAt = Date.now();
+      const recovered = await runShowcaseDeal(ENGINE, flaky, planShowcase(1)[0], { ...RUN_OPTIONS, stallBackoffMs: [40, 40, 40] });
+      expect(recovered).toMatchObject({ ok: true, status: "completed", problem: null });
+      expect(captureCalls).toBe(4);
+      // Three stalls, three pauses: the retries were not fired back to back.
+      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(110);
+
+      // A blip that outlasts the patience is reported with the engine's own words, and the deal is left retryable.
+      captureCalls = -100;
+      const gaveUp = await runShowcaseDeal(ENGINE, flaky, planShowcase(1)[0], { ...RUN_OPTIONS, stallBackoffMs: [1] });
+      expect(gaveUp).toMatchObject({ ok: false, status: "verified" });
+      expect(gaveUp.problem).toContain("NETWORK_ERROR");
     } finally {
       await closeDb(ctx.db);
     }

@@ -3,9 +3,10 @@
  * same-origin enforcement and a privacy-preserving client key for rate limits.
  */
 import "server-only";
-import { createHash, randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { ZodError, type z } from "zod";
 import type { ApiErrorBody } from "../api/dto";
+import { getSessionSecret } from "../config";
 import { InvalidMoveError } from "../domain/negotiation";
 import { IllegalTransitionError } from "../domain/status";
 import { log } from "../observability/logger";
@@ -133,14 +134,44 @@ export function assertSameOrigin(request: Request): void {
   if (originHost !== host) throw forbidden("Cross-site requests are not allowed");
 }
 
+/**
+ * The request body as text, or null when it is larger than `maxBytes`.
+ *
+ * The limit is enforced WHILE reading: the stream is abandoned as soon as it has delivered more
+ * than the limit. A Content-Length header only lets an honest oversized request be refused before
+ * any of it is read — a chunked request carries none, and checking the size after `request.text()`
+ * would mean the whole body had already been buffered, however large.
+ *
+ * Decoded as UTF-8 exactly like `request.text()`, so a caller that verifies a signature over the
+ * body (the PayPal webhook) sees the same characters either way.
+ */
+export async function readBodyText(request: Request, maxBytes: number): Promise<string | null> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > maxBytes) return null;
+  if (request.body === null) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      // Tell the source to stop producing; whatever it still holds is never read.
+      await reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  return new TextDecoder().decode(Buffer.concat(chunks));
+}
+
 /** Read and validate a JSON body with a hard size limit. */
 export async function readJson<S extends z.ZodType>(request: Request, schema: S, maxBytes = 16_384): Promise<z.infer<S>> {
   const type = request.headers.get("content-type") ?? "";
   if (!type.toLowerCase().includes("application/json")) throw invalid("Content-Type must be application/json");
-  const declared = Number(request.headers.get("content-length") ?? "0");
-  if (Number.isFinite(declared) && declared > maxBytes) throw invalid("Request body is too large");
-  const text = await request.text();
-  if (Buffer.byteLength(text, "utf8") > maxBytes) throw invalid("Request body is too large");
+  const text = await readBodyText(request, maxBytes);
+  if (text === null) throw invalid("Request body is too large");
   let parsed: unknown;
   try {
     parsed = text.length === 0 ? {} : JSON.parse(text);
@@ -151,14 +182,17 @@ export async function readJson<S extends z.ZodType>(request: Request, schema: S,
 }
 
 /**
- * A stable, non-reversible key for the caller's network address, for rate limiting only.
- * The raw IP is never stored or logged.
+ * A stable key for the caller's network address, for rate limiting only. The raw IP is never
+ * stored or logged, and the key cannot be turned back into one: it is an HMAC under the server's
+ * session secret. A plain hash would not do — IPv4 has only 2^32 addresses, so anyone able to
+ * read the stored keys could recover every address by trying them all. Rotating the secret
+ * changes every key, which merely restarts the rate-limit windows.
  */
 export function clientKey(request: Request): string | null {
   const forwarded = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
   const ip = forwarded || request.headers.get("x-real-ip")?.trim();
   if (!ip) return null;
-  return createHash("sha256").update(`pact-ip:${ip}`).digest("hex").slice(0, 20);
+  return createHmac("sha256", getSessionSecret()).update(`pact-ip:${ip}`).digest("hex").slice(0, 20);
 }
 
 /** Origin of the incoming request as the user's browser sees it (honours the proxy headers Vercel sets). */

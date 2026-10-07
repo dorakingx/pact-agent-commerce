@@ -1,32 +1,19 @@
 /**
  * Applies the SQL migrations in ./drizzle to managed Postgres. Runs at build time
  * (`npm run db:migrate`, part of `vercel-build`) so that no request ever pays for, or races on,
- * a schema change. Without a database URL there is nothing to do: PGlite migrates itself when
- * the app starts.
+ * a schema change. Without a database URL there is nothing to do locally — PGlite migrates
+ * itself when the app starts — but a serverless build without one is stopped here: it would
+ * ship an app whose every instance has its own empty in-memory database
+ * (see src/lib/db/migration-target.ts).
  *
  * The connection URL contains the database password, so nothing printed here may include it.
  */
 import path from "node:path";
 import type { Pool } from "pg";
+import { resolveMigrationTarget } from "../src/lib/db/migration-target";
 import { poolConfigFromUrl } from "../src/lib/db/pool-config";
 
 const MIGRATIONS_FOLDER = path.join(process.cwd(), "drizzle");
-
-function env(name: string): string | undefined {
-  const value = process.env[name]?.trim();
-  return value ? value : undefined;
-}
-
-/**
- * Migrations run only when the app itself will use Postgres (same test as getDatabaseUrl in
- * src/lib/config.ts). A direct connection is preferred when the provider offers one: DDL
- * inside a transaction is not reliable through a transaction-mode pooler.
- */
-function migrationUrl(): string | undefined {
-  const runtimeUrl = env("DATABASE_URL") ?? env("POSTGRES_URL");
-  if (!runtimeUrl) return undefined;
-  return env("DATABASE_URL_UNPOOLED") ?? env("POSTGRES_URL_NON_POOLING") ?? runtimeUrl;
-}
 
 /** Driver errors can quote the connection string; the URL and its password must not reach a build log. */
 function scrub(message: string, url: string): string {
@@ -77,11 +64,17 @@ async function migrateDatabase(url: string): Promise<string> {
 }
 
 async function main(): Promise<void> {
-  const url = migrationUrl();
-  if (!url) {
-    process.stdout.write("No DATABASE_URL — skipping (PGlite migrates at startup)\n");
+  const target = resolveMigrationTarget(process.env);
+  if (target.kind === "skip") {
+    process.stdout.write(`${target.message}\n`);
     return;
   }
+  if (target.kind === "refuse") {
+    process.stderr.write(`Migration refused: ${target.message}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  const { url } = target;
   try {
     process.stdout.write(`${await migrateDatabase(url)}\n`);
   } catch (error) {

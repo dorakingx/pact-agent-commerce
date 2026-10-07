@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { IllegalTransitionError } from "../domain/status";
 import { PaymentError } from "../payments/types";
 import { ApiError, conflict, rateLimited } from "./errors";
-import { assertSameOrigin, clientKey, errorResponse, readJson, requestOrigin, route } from "./http";
+import { assertSameOrigin, clientKey, errorResponse, readBodyText, readJson, requestOrigin, route } from "./http";
 
 const ORIGIN = "https://pact.test";
 
@@ -152,7 +153,52 @@ describe("readJson", () => {
   });
 });
 
+describe("readBodyText", () => {
+  /** A chunked upload: no Content-Length, `chunks` pieces of `chunkBytes` each, counting how many were pulled. */
+  function streamed(chunks: number, chunkBytes: number): { request: Request; pulled: () => number } {
+    let pulled = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled === chunks) return controller.close();
+        pulled += 1;
+        controller.enqueue(new Uint8Array(chunkBytes).fill(0x20));
+      },
+    });
+    const init: RequestInit & { duplex: "half" } = { method: "POST", headers: { "content-type": "application/json" }, body, duplex: "half" };
+    return { request: new Request(`${ORIGIN}/api/webhooks/paypal`, init), pulled: () => pulled };
+  }
+
+  it("stops reading as soon as a body without Content-Length passes the limit", async () => {
+    const upload = streamed(12, 1024 * 1024);
+    expect(await readBodyText(upload.request, 1024)).toBeNull();
+    // Not the twelve mebibytes the client was willing to send.
+    expect(upload.pulled()).toBeLessThanOrEqual(2);
+
+    const viaJson = streamed(12, 1024 * 1024);
+    await expect(readJson(viaJson.request, z.object({}), 1024)).rejects.toMatchObject({ status: 400, message: "Request body is too large" });
+    expect(viaJson.pulled()).toBeLessThanOrEqual(2);
+  });
+
+  it("returns exactly what was sent when it fits, and refuses a declared oversize without reading", async () => {
+    const raw = '{"id":"WH-1",  "note":"caf\u00e9 ☕"}';
+    expect(await readBodyText(post({}, raw), 1024)).toBe(raw);
+    expect(await readBodyText(new Request(`${ORIGIN}/x`, { method: "POST" }), 1024)).toBe("");
+    const small = streamed(3, 100);
+    expect(await readBodyText(small.request, 1024)).toHaveLength(300);
+    expect(await readBodyText(post({ "content-length": "999999" }, "{}"), 1024)).toBeNull();
+  });
+});
+
 describe("clientKey and requestOrigin", () => {
+  it("cannot be turned back into an address by hashing every address: the key depends on a server secret", () => {
+    vi.stubEnv("SESSION_SECRET", "secret-one-0123456789abcdef");
+    const first = clientKey(post({ "x-forwarded-for": "203.0.113.7" }));
+    expect(first).toMatch(/^[0-9a-f]{20}$/);
+    expect(first).not.toBe(createHash("sha256").update("pact-ip:203.0.113.7").digest("hex").slice(0, 20));
+    vi.stubEnv("SESSION_SECRET", "secret-two-0123456789abcdef");
+    expect(clientKey(post({ "x-forwarded-for": "203.0.113.7" }))).not.toBe(first);
+  });
+
   it("derives a stable key from the first forwarded hop and never returns the address itself", () => {
     const key = clientKey(post({ "x-forwarded-for": "203.0.113.7, 10.0.0.1" }));
     expect(key).toMatch(/^[0-9a-f]{20}$/);

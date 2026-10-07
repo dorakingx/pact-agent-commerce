@@ -145,11 +145,23 @@ export interface RunOptions {
   tzOffsetMinutes: number;
   /** Called after every step, for progress output. */
   onStep?: (deal: DealView) => void;
+  /**
+   * How long to wait before retrying a step that stalled, one entry per consecutive stall.
+   * When the list is used up the deal is reported instead of being retried further.
+   */
+  stallBackoffMs?: readonly number[];
 }
 
 /** A deal takes about fifteen steps; anything near this many is stuck, not slow. */
 const MAX_STEPS = 80;
 const BUSY_RETRY_MS = 250;
+/**
+ * A step that could not complete is retried by calling again — "after a pause, not in a tight
+ * loop" (AdvanceResponse). The engine gives some payment steps only a few attempts before it
+ * closes the deal, so retries a few milliseconds apart would spend them all inside one short
+ * PayPal blip and turn it into a permanently failed showcase deal. These pauses outlast one.
+ */
+const STALL_BACKOFF_MS: readonly number[] = [2_000, 4_000, 8_000];
 
 class SeedProblem extends Error {}
 
@@ -190,7 +202,16 @@ async function passGate(engine: SeedEngine, ctx: ServiceContext, plan: ShowcaseP
   }
 }
 
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** The step ran into a problem and left the deal where it was: `lastError` says why, and the same step is still due. */
+function stalled(advanced: AdvanceResponse): boolean {
+  return advanced.executed === null && !advanced.busy && advanced.deal.next.kind === "auto" && advanced.deal.lastError !== null;
+}
+
 async function driveToEnd(engine: SeedEngine, ctx: ServiceContext, plan: ShowcasePlan, first: DealView, options: RunOptions): Promise<DealView> {
+  const backoff = options.stallBackoffMs ?? STALL_BACKOFF_MS;
+  let stalls = 0;
   let deal = first;
   for (let step = 0; step < MAX_STEPS; step += 1) {
     options.onStep?.(deal);
@@ -202,8 +223,17 @@ async function driveToEnd(engine: SeedEngine, ctx: ServiceContext, plan: Showcas
         break;
       case "auto": {
         const advanced = await engine.advanceDeal(ctx, engine.owner, deal.id, options.appUrl);
-        if (advanced.busy) await new Promise((resolve) => setTimeout(resolve, BUSY_RETRY_MS));
         deal = advanced.deal;
+        if (advanced.busy) {
+          await pause(BUSY_RETRY_MS);
+        } else if (stalled(advanced)) {
+          // Out of patience: leave the deal as it is (it can be advanced later) and say what held it up.
+          if (stalls >= backoff.length) throw new SeedProblem(deal.lastError ?? `the "${deal.status}" step kept stalling`);
+          await pause(backoff[stalls]);
+          stalls += 1;
+        } else {
+          stalls = 0;
+        }
         break;
       }
       default:
@@ -259,7 +289,9 @@ export async function runShowcaseDeal(engine: SeedEngine, ctx: ServiceContext, p
         () => "unavailable" as const,
       )
     : null;
-  return resultOf(plan, deal, { reconciliation, problem: null });
+  // A deal that ended somewhere else usually says why itself (a payment failure, a blocked capture).
+  const problem = deal.status === plan.expected ? null : deal.lastError;
+  return resultOf(plan, deal, { reconciliation, problem });
 }
 
 /* -------------------------------------------------------------------------- */

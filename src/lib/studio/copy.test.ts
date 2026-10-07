@@ -129,6 +129,28 @@ describe("scriptedCopy", () => {
     expect(segmenterWords(second.text, "en")).toBeLessThanOrEqual(120);
   });
 
+  it("names the subject in a tagline, which has no room for the opening sentence that usually does", () => {
+    for (const language of LANGUAGES) {
+      for (let index = 1; index <= 4; index += 1) {
+        const { text } = scriptedCopy({ subject: "coffee subscription", tone: null, index, count: 4, language, minWords: 6, maxWords: 12 });
+        expect(text.toLowerCase(), `${language} #${index}`).toContain("coffee subscription");
+        const size = segmenterWords(text, language);
+        expect(size, `${language} #${index}: ${text}`).toBeGreaterThanOrEqual(6);
+        expect(size, `${language} #${index}: ${text}`).toBeLessThanOrEqual(12);
+      }
+    }
+    // English reads as a lead line: "Coffee subscription: Built with care."
+    const first = scriptedCopy({ subject: "coffee subscription", tone: null, index: 1, count: 4, language: "en", minWords: 6, maxWords: 12 });
+    expect(first.text).toMatch(/^Coffee subscription: [A-Z]/);
+  });
+
+  it("falls back to the bare lead when even the named one does not fit the range", () => {
+    const subject = "an extraordinarily long product name that could never fit into a three word tagline at all";
+    const { text } = scriptedCopy({ subject, tone: null, index: 1, count: 1, language: "en", minWords: 2, maxWords: 4 });
+    expect(segmenterWords(text, "en")).toBeLessThanOrEqual(4);
+    expect(segmenterWords(text, "en")).toBeGreaterThanOrEqual(2);
+  });
+
   it("honours an inverted range at its minimum", () => {
     const { text } = scriptedCopy({ subject: SUBJECT, tone: null, index: 1, count: 1, language: "en", minWords: 30, maxWords: 10 });
     expect(segmenterWords(text, "en")).toBe(30);

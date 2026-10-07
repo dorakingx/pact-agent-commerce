@@ -18,6 +18,8 @@ import type { FilePart, ModelMessage, TextPart } from "ai";
 import { z } from "zod";
 import { joinList } from "../domain/format";
 import {
+  ASPECT_RATIOS,
+  LANGUAGES,
   VerificationCheckSchema,
   type Artifact,
   type CheckResult,
@@ -38,17 +40,25 @@ import type { AiVerificationContext, AiVerificationFlags } from "./types";
 const MAX_EVIDENCE_CHARS = 400;
 const MAX_EXPLANATION_CHARS = 600;
 const MAX_MANIPULATION_EVIDENCE_CHARS = 300;
-/** Vision input is the expensive part of a verification call; eight images cover 6 illustrations with room for variants. */
-const MAX_IMAGES = 8;
+/**
+ * Every file a contract can require is shown: the intake allows 6 illustrations in 3 aspect
+ * ratios. A "pass" must never rest on files the model did not see, so the cap is the largest
+ * contract, not a budget — anything beyond it is an extra the contract never asked for.
+ */
+const MAX_IMAGES = 18;
 const IMAGE_MAX_SIDE = 512;
+/** 8 pieces in 3 languages, the largest copy job the intake allows. */
 const MAX_COPY_TEXTS = 24;
-const MAX_COPY_CHARS = 6000;
+/** The longest text the artifact schema accepts, so copy is never cut before the model reads it. */
+const MAX_COPY_CHARS = 20_000;
 const MAX_SVG_TEXT_CHARS = 500;
 const VERIFIER_TIMEOUT_MS = 40_000;
 
 /** Confidence the deterministic language heuristic must reach before it may contradict the model. */
 const HEURISTIC_OVERRIDE_CONFIDENCE = 0.9;
 const DOWNGRADED_CONFIDENCE = 0.4;
+/** How many unseen files a downgraded check names before it summarises the rest. */
+const MAX_UNSEEN_NAMED = 6;
 const HEURISTIC_CONFIDENCE = 0.9;
 const HEURISTIC_UNSURE_CONFIDENCE = 0.5;
 const HEURISTIC_PREFIX = "Heuristic evaluator (AI disabled):";
@@ -116,12 +126,35 @@ function artifactLabel(artifact: Artifact): string {
   }
 }
 
+/**
+ * The variant of an artifact as PACT may print it in its OWN words. The claimed aspect ratio and
+ * language are strings the seller wrote; outside a data fence only a value from PACT's closed
+ * lists is repeated, anything else is called what it is.
+ */
+function knownVariant(artifact: Artifact): string {
+  switch (artifact.kind) {
+    case "illustration":
+      return (ASPECT_RATIOS as readonly string[]).includes(artifact.aspectRatio) ? artifact.aspectRatio : "unlisted ratio";
+    case "copy":
+      return (LANGUAGES as readonly string[]).includes(artifact.language) ? artifact.language : "unlisted language";
+  }
+}
+
+/**
+ * How the prompt names an artifact outside any fence: its piece number and a known variant —
+ * integers and enum values only. The artifact's id, title and claimed labels are the seller's
+ * text and appear solely inside the fenced data block that follows a heading.
+ */
+function promptLabel(artifact: Artifact): string {
+  return `#${artifact.index} (${knownVariant(artifact)})`;
+}
+
 function illustrationHeading(artifact: IllustrationArtifact): string {
-  return `Artifact ${artifact.id} — illustration #${artifact.index}, claimed ratio ${artifact.aspectRatio}, ${artifact.width}x${artifact.height}`;
+  return `Illustration ${promptLabel(artifact)}, ${artifact.width}x${artifact.height} px`;
 }
 
 function copyHeading(artifact: CopyArtifact): string {
-  return `Artifact ${artifact.id} — copy piece #${artifact.index}, claimed language ${artifact.language}`;
+  return `Copy piece ${promptLabel(artifact)}`;
 }
 
 function stripTags(markup: string): string {
@@ -191,34 +224,45 @@ function capList(items: readonly string[], maxChars: number): string[] {
 }
 
 /**
- * Choose which illustrations the model sees. One variant of every illustration comes first, so
- * that all subjects are judged before any second aspect ratio of the same picture is spent on.
+ * Choose which illustrations the model sees, in an order PACT decides: every slot the contract
+ * requires (piece 1 in each contracted ratio, then piece 2, …) before anything else. The order
+ * of the submission is the seller's and decides nothing, so a file the contract requires can
+ * never be pushed out of view by where the seller put it. Whatever does not fit is `omitted`.
  */
-function sampleIllustrations(artifacts: readonly IllustrationArtifact[]): {
-  shown: IllustrationArtifact[];
-  omitted: IllustrationArtifact[];
-} {
-  const firstOfIndex = new Set<IllustrationArtifact>();
-  const seen = new Set<number>();
-  for (const artifact of artifacts) {
-    if (!seen.has(artifact.index)) {
-      seen.add(artifact.index);
-      firstOfIndex.add(artifact);
+function sampleIllustrations(
+  artifacts: readonly IllustrationArtifact[],
+  spec: DeliverableSpec | undefined,
+): { shown: IllustrationArtifact[]; omitted: IllustrationArtifact[] } {
+  const required: IllustrationArtifact[] = [];
+  if (spec?.kind === "illustration") {
+    for (let index = 1; index <= spec.count; index += 1) {
+      for (const ratio of spec.aspectRatios) {
+        const match = artifacts.find((a) => a.index === index && a.aspectRatio === ratio && !required.includes(a));
+        if (match) required.push(match);
+      }
     }
   }
-  const priority = [...artifacts.filter((a) => firstOfIndex.has(a)), ...artifacts.filter((a) => !firstOfIndex.has(a))];
+  const priority = [...required, ...artifacts.filter((a) => !required.includes(a))];
   const chosen = new Set(priority.slice(0, MAX_IMAGES));
-  return { shown: artifacts.filter((a) => chosen.has(a)), omitted: artifacts.filter((a) => !chosen.has(a)) };
+  return { shown: priority.filter((a) => chosen.has(a)), omitted: priority.filter((a) => !chosen.has(a)) };
 }
 
 type ContentPart = TextPart | FilePart;
 
+interface IllustrationContent {
+  parts: ContentPart[];
+  /** False when the image could not be rendered and the model got a description of the file instead. */
+  seen: boolean;
+}
+
 async function illustrationParts(
   artifact: IllustrationArtifact,
   rasterize: NonNullable<VerifierDeps["rasterize"]>,
-): Promise<ContentPart[]> {
+): Promise<IllustrationContent> {
   const svg = readSvg(artifact.svg);
   const sellerText = {
+    artifactId: artifact.id,
+    claimedAspectRatio: artifact.aspectRatio,
     sellerTitle: artifact.title,
     sellerDescription: artifact.description,
     textDrawnInImage: capList(svg.visibleText, MAX_SVG_TEXT_CHARS),
@@ -226,24 +270,31 @@ async function illustrationParts(
   };
   const png = await rasterize(artifact.svg, IMAGE_MAX_SIDE);
   if (png) {
-    return [
-      { type: "text", text: `${illustrationHeading(artifact)}\n${dataBlock("ARTIFACT_TEXT", sellerText)}` },
-      { type: "file", mediaType: "image/png", data: png },
-    ];
+    return {
+      seen: true,
+      parts: [
+        { type: "text", text: `${illustrationHeading(artifact)}\n${dataBlock("ARTIFACT_TEXT", sellerText)}` },
+        { type: "file", mediaType: "image/png", data: png },
+      ],
+    };
   }
   // No pixels to show: describe what the file contains so the model can still say "uncertain" on real grounds.
   const description = { ...sellerText, imageUnavailable: true, shapes: svg.elements, palette: svg.palette };
-  return [
-    {
-      type: "text",
-      text: `${illustrationHeading(artifact)}\nThe image could not be rendered. A structural summary of the SVG follows.\n${dataBlock("ARTIFACT_SUMMARY", description)}`,
-    },
-  ];
+  return {
+    seen: false,
+    parts: [
+      {
+        type: "text",
+        text: `${illustrationHeading(artifact)}\nThe image could not be rendered. A structural summary of the SVG follows.\n${dataBlock("ARTIFACT_SUMMARY", description)}`,
+      },
+    ],
+  };
 }
 
 function copyPart(artifact: CopyArtifact): ContentPart {
   const text = artifact.text.length > MAX_COPY_CHARS ? `${artifact.text.slice(0, MAX_COPY_CHARS)} [truncated]` : artifact.text;
-  return { type: "text", text: `${copyHeading(artifact)}\n${dataBlock("ARTIFACT_TEXT", { title: artifact.title, text })}` };
+  const sellerText = { artifactId: artifact.id, claimedLanguage: artifact.language, title: artifact.title, text };
+  return { type: "text", text: `${copyHeading(artifact)}\n${dataBlock("ARTIFACT_TEXT", sellerText)}` };
 }
 
 function briefOf(ctx: AiVerificationContext) {
@@ -257,14 +308,24 @@ function briefOf(ctx: AiVerificationContext) {
 }
 
 function listLabels(artifacts: readonly Artifact[]): string {
-  return artifacts.length > 0 ? artifacts.map((a) => `${a.id} ${artifactLabel(a)}`).join(", ") : "none";
+  return artifacts.length > 0 ? artifacts.map(promptLabel).join(", ") : "none";
 }
 
-async function buildMessages(ctx: AiVerificationContext, rasterize: NonNullable<VerifierDeps["rasterize"]>): Promise<ModelMessage[]> {
+interface VerifierPrompt {
+  messages: ModelMessage[];
+  /**
+   * Delivered files the model could not judge by looking: left out of the prompt, shown without
+   * pixels, or cut short. Computed here, in code, because the model's own account of what it saw
+   * is not something a payment may rest on.
+   */
+  unseen: Artifact[];
+}
+
+async function buildPrompt(ctx: AiVerificationContext, rasterize: NonNullable<VerifierDeps["rasterize"]>): Promise<VerifierPrompt> {
   const { submission } = ctx;
   const illustrations = submission.artifacts.filter((a): a is IllustrationArtifact => a.kind === "illustration");
   const copies = submission.artifacts.filter((a): a is CopyArtifact => a.kind === "copy");
-  const sample = sampleIllustrations(illustrations);
+  const sample = sampleIllustrations(illustrations, ctx.contract.deliverables[0]);
   const shownCopies = copies.slice(0, MAX_COPY_TEXTS);
   const omitted: Artifact[] = [...sample.omitted, ...copies.slice(MAX_COPY_TEXTS)];
 
@@ -280,18 +341,23 @@ async function buildMessages(ctx: AiVerificationContext, rasterize: NonNullable<
   ].join("\n");
 
   const illustrationContent = await Promise.all(sample.shown.map((artifact) => illustrationParts(artifact, rasterize)));
+  const withoutPixels = sample.shown.filter((_artifact, position) => !illustrationContent[position].seen);
+  const cutShort = shownCopies.filter((artifact) => artifact.text.length > MAX_COPY_CHARS);
   const closing = `Return one check for each of these rule ids: ${ctx.rules.map((rule) => rule.id).join(", ") || "(none)"}.`;
-  return [
-    {
-      role: "user",
-      content: [
-        { type: "text", text: intro },
-        ...illustrationContent.flat(),
-        ...shownCopies.map(copyPart),
-        { type: "text", text: closing },
-      ],
-    },
-  ];
+  return {
+    unseen: [...omitted, ...withoutPixels, ...cutShort],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: intro },
+          ...illustrationContent.flatMap((content) => content.parts),
+          ...shownCopies.map(copyPart),
+          { type: "text", text: closing },
+        ],
+      },
+    ],
+  };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -318,7 +384,8 @@ function languageGaps(spec: CopySpec, artifacts: readonly Artifact[]): { missing
   for (let piece = 1; piece <= spec.count; piece += 1) {
     const detected = artifacts
       .filter((a): a is CopyArtifact => a.kind === "copy" && a.index === piece)
-      .map((a) => detectLanguage(a.text));
+      // The piece is expected to name the contract's subject, which may be in another language.
+      .map((a) => detectLanguage(a.text, { ignore: [spec.subject] }));
     for (const language of spec.languages) {
       if (detected.some((d) => d.language === language)) continue;
       const allConfidentlyOther = detected.every((d) => d.language !== "unknown" && d.confidence >= HEURISTIC_OVERRIDE_CONFIDENCE);
@@ -411,7 +478,34 @@ function crossCheckLanguages(check: VerificationCheck, ctx: AiVerificationContex
   };
 }
 
-function postProcess(output: VerifierOutput, ctx: AiVerificationContext): { checks: VerificationCheck[]; flags: AiVerificationFlags } {
+/**
+ * A "pass" on brief adherence says every item matches the brief. It cannot say that about items
+ * the model never looked at, so it does not survive them: the result becomes "uncertain", which
+ * sends the delivery to a human. A fail stands — one off-brief item among those seen is enough.
+ */
+function limitToWhatWasSeen(check: VerificationCheck, unseen: readonly Artifact[]): VerificationCheck {
+  if (check.kind !== "brief_adherence" || check.result !== "pass" || unseen.length === 0) return check;
+  const named = unseen.slice(0, MAX_UNSEEN_NAMED).map(artifactLabel);
+  const more = unseen.length - named.length;
+  const files = `${joinList(named)}${more > 0 ? ` and ${more} more` : ""}`;
+  return {
+    ...check,
+    result: "uncertain",
+    confidence: Math.min(check.confidence, DOWNGRADED_CONFIDENCE),
+    evidence: cleanLine(`The AI verifier passed what it was shown, but could not look at ${files}.`, MAX_EVIDENCE_CHARS),
+    explanation: cleanLine(
+      `${unseen.length} delivered ${unseen.length === 1 ? "file" : "files"} could not be examined by the AI verifier, so its pass covers only part of the delivery. A human should look at the rest before payment is released.`,
+      MAX_EXPLANATION_CHARS,
+    ),
+    artifactIds: unseen.map((artifact) => artifact.id),
+  };
+}
+
+function postProcess(
+  output: VerifierOutput,
+  ctx: AiVerificationContext,
+  unseen: readonly Artifact[],
+): { checks: VerificationCheck[]; flags: AiVerificationFlags } {
   // First result per rule id wins; results for ids that are not in the contract are dropped.
   const byRule = new Map<string, VerifierOutput["checks"][number]>();
   for (const check of output.checks) {
@@ -428,7 +522,7 @@ function postProcess(output: VerifierOutput, ctx: AiVerificationContext): { chec
         explanation: "The verifier did not return a result for this rule",
       });
     }
-    return crossCheckLanguages(checkFor(rule, ctx, verdict), ctx);
+    return limitToWhatWasSeen(crossCheckLanguages(checkFor(rule, ctx, verdict), ctx), unseen);
   });
   const quote = cleanLine(output.manipulationEvidence ?? "", MAX_MANIPULATION_EVIDENCE_CHARS);
   const flags: AiVerificationFlags = output.manipulationSuspected
@@ -452,7 +546,7 @@ export async function evaluateAiRulesAi(
   deps?: VerifierDeps,
 ): Promise<{ checks: VerificationCheck[]; flags: AiVerificationFlags; model: string; latencyMs: number }> {
   const call = deps?.call ?? callStructured;
-  const messages = await buildMessages(ctx, deps?.rasterize ?? rasterizeSvg);
+  const { messages, unseen } = await buildPrompt(ctx, deps?.rasterize ?? rasterizeSvg);
   const result = await call({
     role: "verifier",
     schema: VerifierOutputSchema,
@@ -469,7 +563,7 @@ export async function evaluateAiRulesAi(
       round: ctx.submission.round,
     },
   });
-  return { ...postProcess(result.output, ctx), model: result.model, latencyMs: result.latencyMs };
+  return { ...postProcess(result.output, ctx, unseen), model: result.model, latencyMs: result.latencyMs };
 }
 
 const SUBJECT_STOPWORDS = new Set(["with", "from", "that", "this", "your", "ours", "their", "about", "into", "each", "page", "pages"]);
@@ -483,7 +577,11 @@ const MIN_SVG_SHAPES = 3;
 const MIN_DESCRIPTION_CHARS = 10;
 const MIN_COPY_WORDS = 40;
 
-function isSubstantive(artifact: Artifact, keywords: readonly string[]): boolean {
+/**
+ * `minCopyWords`: how long copy must be to count without naming the subject. Never more than the
+ * contract's own minimum — a tagline contracted at 6 to 12 words cannot be asked for 40.
+ */
+function isSubstantive(artifact: Artifact, keywords: readonly string[], minCopyWords: number): boolean {
   switch (artifact.kind) {
     case "illustration":
       return (
@@ -493,7 +591,7 @@ function isSubstantive(artifact: Artifact, keywords: readonly string[]): boolean
       );
     case "copy": {
       const text = artifact.text.toLowerCase();
-      return keywords.some((keyword) => text.includes(keyword)) || countWords(artifact.text, artifact.language) >= MIN_COPY_WORDS;
+      return keywords.some((keyword) => text.includes(keyword)) || countWords(artifact.text, artifact.language) >= minCopyWords;
     }
   }
 }
@@ -501,7 +599,8 @@ function isSubstantive(artifact: Artifact, keywords: readonly string[]): boolean
 function heuristicBriefAdherence(rule: VerificationRule, ctx: AiVerificationContext): VerificationCheck {
   const { artifacts } = ctx.submission;
   const keywords = subjectKeywords(ctx.contract.deliverables[0]?.subject ?? "");
-  const thin = artifacts.filter((artifact) => !isSubstantive(artifact, keywords));
+  const minCopyWords = Math.min(MIN_COPY_WORDS, copySpecOf(ctx)?.minWords ?? MIN_COPY_WORDS);
+  const thin = artifacts.filter((artifact) => !isSubstantive(artifact, keywords, minCopyWords));
   if (artifacts.length > 0 && thin.length === 0) {
     return checkFor(rule, ctx, {
       result: "pass",

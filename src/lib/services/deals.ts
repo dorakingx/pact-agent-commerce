@@ -17,17 +17,22 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import { ZodError } from "zod";
+import { statesOnlyForeignBudget } from "../ai/intent-extract";
 import type { AgentMeta } from "../ai/types";
 import type { AdvanceResponse, CreateDealRequest, DealSummary, DealView, DecisionRequest, StepKind } from "../api/dto";
 import {
   DuplicateError,
   acquireDealLease,
   createDbLedger,
+  deleteWallet,
   findDealIdByAuthorizationId,
   findDealIdByCaptureId,
+  findDealIdByContractBinding,
   findDealIdByOrderId,
+  getContractByDeal,
   getDeal,
   getPayment,
+  getPaymentFunding,
   getWallet,
   getWebhookEvent,
   insertContract,
@@ -41,6 +46,7 @@ import {
   markWebhookProcessed,
   recordWebhookEvent,
   releaseDealLease,
+  setPaymentFunding,
   updateDeal,
   upsertPayment,
   withTransaction,
@@ -48,8 +54,9 @@ import {
   type DealGraph,
   type DealInsert,
   type DealRow,
+  type PaymentOperation,
 } from "../db";
-import { compileContract } from "../domain/contract";
+import { compileContract, paypalCustomId, paypalInvoiceId } from "../domain/contract";
 import { assertNever, plural } from "../domain/format";
 import { newDealCode, newId } from "../domain/ids";
 import { formatMoney } from "../domain/money";
@@ -100,8 +107,8 @@ import {
   newPaymentRecord,
   openOrder,
   reconcile,
+  storedWebhookPayload,
   voidHeldFunds,
-  type ApprovalMode,
   type OrchestratorDeps,
   type PaymentOperationKind,
   type PaymentRecord,
@@ -114,8 +121,8 @@ import { appendAudit, withoutRecorded } from "./audit-log";
 import type { ServiceContext } from "./context";
 import { buildDealView, toArtifactFile, toDealSummary, type ArtifactFile } from "./deal-view";
 import { conflict, forbidden, invalid, notFound, unavailable } from "./errors";
-import { committedSpendToday, effectivePolicy, lockOwnerSpend } from "./policy";
-import { RATE_LIMITS, enforceRule, type RateLimitRule } from "./rate-limit";
+import { committedSpendToday, demoWalletRefusal, effectivePolicy, lockOwnerSpend, walletCommittedToday, type DemoWalletRefusal } from "./policy";
+import { GLOBAL_SUBJECT, RATE_LIMITS, enforceRule, withinRule, type RateLimitRule } from "./rate-limit";
 import { sanitizeIntent, sanitizeReason } from "./sanitize";
 import { SYSTEM_OWNER } from "./session";
 
@@ -142,6 +149,7 @@ const MAX_LIST_LIMIT = 100;
 const DEAL_ID_PATTERN = /^deal_[a-z0-9]{8,32}$/;
 const SIMULATED_ORDER_PATTERN = /^SIM-O-[0-9A-F]{16}$/;
 const NO_SELLER_REASON = "No seller agent in the directory offers this kind of work";
+const FOREIGN_BUDGET_MESSAGE = 'Please state the budget in US dollars, for example "under $60". PACT settles in USD only.';
 
 /* -------------------------------------------------------------------------- */
 /*  Reading                                                                    */
@@ -538,12 +546,15 @@ async function insertWithFreshCode(
  * Turn a human's request into a deal. The browser supplies words (and, optionally, which demo
  * scenario and its UTC offset); the mandate, the seller and the starting status are derived here.
  *
- * @throws ApiError 400 (request too short/long, unknown scenario), 429 (rate limited).
+ * @throws ApiError 400 (request too short/long, unknown scenario, budget not in US dollars), 429 (rate limited).
  */
 export async function createDeal(ctx: ServiceContext, actor: Actor, input: CreateDealRequest): Promise<DealView> {
   const scenario = scenarioFor(input.scenarioId);
   // A scenario card may be submitted untouched: its own request text then stands in.
   const intent = sanitizeIntent(scenario && input.intent.trim() === "" ? scenario.intent : input.intent);
+  // PACT settles in US dollars. A budget typed in another currency would be either ignored or
+  // converted by a model; the human is asked to state it in dollars rather than have it guessed.
+  if (statesOnlyForeignBudget(intent)) throw invalid(FOREIGN_BUDGET_MESSAGE);
   await limitCreation(ctx, actor);
 
   const now = ctx.now();
@@ -599,7 +610,7 @@ const WAITING_ON_FUNDS: ReadonlySet<DealStatus> = new Set<DealStatus>([
  *  - the hold is gone (voided or expired) while the deal still counts on it → "expired";
  *  - PayPal completed a capture PACT asked for → "completed";
  *  - PayPal refused the payment for good → "failed";
- *  - PayPal authorized an order the payer approved → "authorized".
+ *  - PayPal authorized an order the payer approved, or one sent against a delegated wallet → "authorized".
  * A deal that is already releasing the hold ("rejecting") or has ended is never moved by it.
  */
 export function dealStatusForPayment(status: DealStatus, payment: PaymentRecord): PaymentDrivenStatus | null {
@@ -612,7 +623,8 @@ export function dealStatusForPayment(status: DealStatus, payment: PaymentRecord)
     case "failed":
       return status === "verified" || status === "awaiting_payment" ? "failed" : null;
     case "authorized":
-      return status === "awaiting_payment" ? "authorized" : null;
+      // "payment_pending" too: a delegated order whose answer never arrived is learned from PayPal's webhook.
+      return status === "awaiting_payment" || status === "payment_pending" ? "authorized" : null;
     case "none":
     case "created":
     case "approved":
@@ -683,7 +695,6 @@ async function followPayment(ctx: ServiceContext, graph: DealGraph, now: Date): 
 
 const ORDER_OPERATIONS: readonly PaymentOperationKind[] = ["create_order", "authorize"];
 const CAPTURE_OPERATIONS: readonly PaymentOperationKind[] = ["capture"];
-const VOID_OPERATIONS: readonly PaymentOperationKind[] = ["void"];
 
 /** True once the ledger shows the operation behind this step has been tried as often as the engine allows. */
 async function attemptsExhausted(ctx: ServiceContext, dealId: string, kinds: readonly PaymentOperationKind[]): Promise<boolean> {
@@ -737,23 +748,34 @@ function hasPendingCapture(payment: PaymentRecord): boolean {
   return payment.status === "authorized" && payment.capturedMinor === 0 && payment.captureId !== null;
 }
 
+/** The provider's refusal to void an authorization because it has been captured: proof that money moved. */
+const PREVIOUSLY_CAPTURED = "PREVIOUSLY_CAPTURED";
+
+interface Release extends PaymentStepResult {
+  /** The provider would not release the hold because the authorization is captured. */
+  capturedAtProvider: boolean;
+}
+
 /**
  * A deal that has just failed must not leave money on hold. Voids whatever is still voidable and
  * reports what happened; a PayPal problem here is recorded, never thrown, because the deal's
  * failure has to be written either way. When the release does not happen the record is returned
  * as it was — it still describes the hold — and the audit trail says why.
  */
-async function releaseHold(ctx: ServiceContext, dealId: string, payment: PaymentRecord, reason: string): Promise<PaymentStepResult> {
-  if (!checkVoidAllowed({ dealStatus: "failed", payment }).allowed) return { payment, events: [] };
+async function releaseHold(ctx: ServiceContext, dealId: string, payment: PaymentRecord, reason: string): Promise<Release> {
+  if (!checkVoidAllowed({ dealStatus: "failed", payment }).allowed) return { payment, events: [], capturedAtProvider: false };
   try {
-    return await voidHeldFunds(paymentDeps(ctx), { dealId, payment, reason });
+    return { ...(await voidHeldFunds(paymentDeps(ctx), { dealId, payment, reason })), capturedAtProvider: false };
   } catch (error) {
     if (!(error instanceof PaymentStepError)) throw error;
+    const capturedAtProvider = error.issue === PREVIOUSLY_CAPTURED;
     const notice = problemEvent(
-      `The hold could not be released automatically (${error.issue}); it lapses when the authorization expires`,
+      capturedAtProvider
+        ? `The hold was not released: ${providerLabel(ctx.provider.kind)} reports the authorization as captured`
+        : `The hold could not be released automatically (${error.issue}); it lapses when the authorization expires`,
       { issue: error.issue, retryable: error.retryable },
     );
-    return { payment, events: [...error.events, notice] };
+    return { payment, events: [...error.events, notice], capturedAtProvider };
   }
 }
 
@@ -762,33 +784,99 @@ interface PaymentFailure {
   events: AuditEventInput[];
   /** Written to the deal as `lastError`. */
   message: string;
+  /** The provider's issue code behind the failure, or null when PACT's own guard refused. */
+  issue: string | null;
   /** Why the hold is being released, for the provider and the audit trail. Null when releasing it is what failed. */
   releaseReason: string | null;
 }
 
-/** Close a deal as failed after a payment problem, releasing whatever is still held. */
-async function failDeal(ctx: ServiceContext, graph: DealGraph, failed: PaymentFailure, now: Date): Promise<void> {
-  const released =
+/**
+ * The deal-level line every close-as-failed writes, so no deal ever becomes "failed" without the
+ * trail saying so — and saying whether money is still on hold, which is the one thing a reader
+ * of a failed deal needs to know.
+ */
+function failedEvent(
+  kind: ProviderKind,
+  payment: PaymentRecord,
+  failed: Pick<PaymentFailure, "message" | "issue">,
+  /** The provider refused to release the hold because the authorization is captured. */
+  capturedAtProvider = false,
+): AuditEventInput {
+  const name = providerLabel(kind);
+  const holdRemains = payment.status === "authorized" && !capturedAtProvider;
+  let title: string;
+  if (capturedAtProvider) {
+    title = `Deal failed, but ${name} reports the authorization as captured — money may have moved; reconcile this deal`;
+  } else if (holdRemains) {
+    title = `Deal failed: ${formatMoney(payment.authorizedMinor)} is still held by ${name} until the authorization is released or expires`;
+  } else if (payment.status === "created" || payment.status === "approved") {
+    title = `Deal failed: the ${name} order was left open and could not be confirmed as abandoned`;
+  } else if (payment.status === "captured") {
+    title = `Deal failed although ${name} captured ${formatMoney(payment.capturedMinor)} — reconcile this deal`;
+  } else {
+    title = "Deal failed: no funds are held and nothing was captured";
+  }
+  return {
+    actor: "system",
+    type: "deal.failed",
+    title,
+    detail: failed.message,
+    data: {
+      issue: failed.issue,
+      paymentStatus: payment.status,
+      holdRemains,
+      capturedAtProvider,
+      orderId: payment.orderId,
+      authorizationId: payment.authorizationId,
+      authorizedMinor: holdRemains ? payment.authorizedMinor : 0,
+      authorizationExpiresAt: holdRemains ? payment.authorizationExpiresAt : null,
+    },
+  };
+}
+
+/**
+ * Close a deal as failed after a payment problem, releasing whatever is still held.
+ *
+ * One exception: a verified delivery whose hold the provider will not release BECAUSE the
+ * authorization is captured. That refusal is evidence that the seller was paid, so the deal is
+ * not closed as failed; it stays verified until the capture is confirmed (the next attempt
+ * adopts it, and the provider's webhook says the same).
+ *
+ * @returns true when the deal was closed, false when it was left where it is.
+ */
+async function failDeal(ctx: ServiceContext, graph: DealGraph, failed: PaymentFailure, now: Date): Promise<boolean> {
+  const released: Release =
     failed.releaseReason === null
-      ? { payment: failed.payment, events: [] }
+      ? { payment: failed.payment, events: [], capturedAtProvider: false }
       : await releaseHold(ctx, graph.deal.id, failed.payment, failed.releaseReason);
+  const save = (tx: Db): Promise<void> => upsertPayment(tx, graph.deal.id, released.payment);
+  if (released.capturedAtProvider && graph.deal.status === "verified") {
+    const message = `${providerLabel(ctx.provider.kind)} reports the authorization as captured, so the hold was not released. Whether the seller was paid is being confirmed — retry the step.`;
+    const events = [...failed.events, ...released.events, problemEvent(message, { issue: PREVIOUSLY_CAPTURED, retryable: true })];
+    await commit(ctx, graph.deal, { to: graph.deal.status, events: withoutRecorded(graph.audit, events), patch: { lastError: message }, rows: save }, now);
+    return false;
+  }
   await commit(
     ctx,
     graph.deal,
     {
       to: "failed",
-      events: [...failed.events, ...released.events],
+      events: [...failed.events, ...released.events, failedEvent(ctx.provider.kind, released.payment, failed, released.capturedAtProvider)],
       patch: { lastError: failed.message },
-      rows: (tx) => upsertPayment(tx, graph.deal.id, released.payment),
+      rows: save,
     },
     now,
   );
+  return true;
 }
 
 /**
  * A payment step threw. A transient problem leaves the deal where it is (false: nothing ran to
  * completion) until the same operation has been tried MAX_PAYMENT_ATTEMPTS times; anything else
  * closes the deal as failed and releases the hold (true: the deal moved).
+ *
+ * Only for steps where giving up is safe: an interactive order (nothing is held before the payer
+ * approves) and a capture the provider answered. A void and a delegated order decide for themselves.
  */
 async function settlePaymentError(
   ctx: ServiceContext,
@@ -803,8 +891,7 @@ async function settlePaymentError(
     return false;
   }
   const message = failureMessage(ctx.provider.kind, error);
-  await failDeal(ctx, graph, { payment: error.payment, events: error.events, message, releaseReason }, now);
-  return true;
+  return failDeal(ctx, graph, { payment: error.payment, events: error.events, message, issue: error.issue, releaseReason }, now);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1048,14 +1135,37 @@ async function policyStep(ctx: ServiceContext, graph: DealGraph, now: Date): Pro
 const SPEND_REFUSED_STATUS: DealStatus = "blocked";
 const SPEND_REFUSED_MESSAGE = "Blocked by the daily spending limit: other deals committed the remaining budget first.";
 
-/** The vault id of the wallet this owner's agent may pay from, or null for interactive approval. Never leaves the server. */
-async function delegatedVaultId(ctx: ServiceContext, owner: string): Promise<string | null> {
-  for (const walletOwner of [owner, DEMO_WALLET_OWNER]) {
-    const wallet = await getWallet(ctx.db, walletOwner);
-    // A vault id only means something to the provider that issued it.
-    if (wallet?.status === "active" && wallet.vaultId !== null && wallet.provider === ctx.provider.kind) return wallet.vaultId;
-  }
-  return null;
+/** A delegated wallet an order can be charged against. The vault id is a credential and never leaves the server. */
+interface WalletChoice {
+  owner: string;
+  vaultId: string;
+}
+
+async function activeWallet(ctx: ServiceContext, walletOwner: string): Promise<WalletChoice | null> {
+  const wallet = await getWallet(ctx.db, walletOwner);
+  // A vault id only means something to the provider that issued it.
+  const usable = wallet?.status === "active" && wallet.vaultId !== null && wallet.provider === ctx.provider.kind;
+  return usable && wallet.vaultId !== null ? { owner: walletOwner, vaultId: wallet.vaultId } : null;
+}
+
+/** The wallet this owner's agent may pay from — their own first, then the shared demo wallet — or null for interactive approval. */
+async function delegatedWallet(ctx: ServiceContext, owner: string): Promise<WalletChoice | null> {
+  return (await activeWallet(ctx, owner)) ?? (await activeWallet(ctx, DEMO_WALLET_OWNER));
+}
+
+const WALLET_LIMIT_NOTICE: Record<DemoWalletRefusal, string> = {
+  demo_wallet_order_limit: "This order is above the shared demo wallet's per-order cap, so the payer approves it in PayPal instead",
+  demo_wallet_daily_limit: "The shared demo wallet's daily total is committed, so the payer approves this order in PayPal instead",
+};
+
+/** The agent could not pay on its own and the payer is asked instead: a fallback, not a failure. */
+function payerFallbackEvent(title: string, reason: string): AuditEventInput {
+  return { actor: "system", type: "system.degraded", title, data: { step: "order", reason } };
+}
+
+/** How the deal's order is to be paid: against this wallet, or (null) by the payer's own approval. */
+interface Reservation {
+  walletOwner: string | null;
 }
 
 /**
@@ -1070,29 +1180,50 @@ async function delegatedVaultId(ctx: ServiceContext, owner: string): Promise<str
  * Only the daily limit is re-judged: the other checks were settled at signing (and, where
  * needed, approved by a human), and a later policy edit does not reach back into a signed deal.
  *
- * @returns false when the deal was refused and closed.
+ * The reservation also fixes HOW the order is paid, once: against `candidate` or interactively.
+ * A retry reuses that decision, because the create-order call is replayed under one idempotency
+ * key and must not change from a wallet charge into an approval link (or back) in between.
+ *
+ * The shared demo wallet has a cap of its own, checked here under that wallet's lock. A visitor's
+ * policy and per-session total cannot be that cap — the visitor writes the one and resets the
+ * other with a new cookie. An order the wallet may not pay is not refused; the payer approves it.
+ *
+ * @returns null when the deal was refused and closed.
  */
-async function reserveSpend(ctx: ServiceContext, graph: DealGraph, mode: ApprovalMode, now: Date): Promise<boolean> {
+async function reserveSpend(ctx: ServiceContext, graph: DealGraph, candidate: WalletChoice | null, now: Date): Promise<Reservation | null> {
   const { deal } = graph;
   const signed = signedOf(graph);
   const seller = sellerOf(graph);
+  const priceMinor = signed.contract.price.amountMinor;
   const policy = await effectivePolicy(ctx.db, deal.owner);
   return withTransaction(ctx.db, async (tx) => {
     await lockOwnerSpend(tx, deal.owner);
     const committedMinor = await committedSpendToday(tx, deal.owner, now, { excludeDealId: deal.id });
     const evaluation = evaluateSpend(policy, signed, seller, committedMinor, now);
     const overLimit = evaluation.checks.some((check) => check.id === "daily_limit" && check.outcome === "block");
-    if (!overLimit) {
-      if ((await getPayment(tx, deal.id)) === null) {
-        await upsertPayment(tx, deal.id, newPaymentRecord(ctx.provider.kind, mode, signed.contract.price.amountMinor, now));
-      }
-      return true;
+    if (overLimit) {
+      assertTransition(deal.status, SPEND_REFUSED_STATUS);
+      await appendAudit(tx, deal.id, [policyEvent(evaluation, "Spending policy: blocked by the daily limit before the order")], now);
+      const patch = { status: SPEND_REFUSED_STATUS, policyEvaluation: evaluation, lastError: SPEND_REFUSED_MESSAGE, updatedAt: now.toISOString() };
+      if ((await updateDeal(tx, deal.id, deal.version, patch)) === null) throw staleDeal();
+      return null;
     }
-    assertTransition(deal.status, SPEND_REFUSED_STATUS);
-    await appendAudit(tx, deal.id, [policyEvent(evaluation, "Spending policy: blocked by the daily limit before the order")], now);
-    const patch = { status: SPEND_REFUSED_STATUS, policyEvaluation: evaluation, lastError: SPEND_REFUSED_MESSAGE, updatedAt: now.toISOString() };
-    if ((await updateDeal(tx, deal.id, deal.version, patch)) === null) throw staleDeal();
-    return false;
+    const existing = await getPaymentFunding(tx, deal.id);
+    if (existing !== null) return existing;
+
+    let walletOwner = candidate?.owner ?? null;
+    if (walletOwner === DEMO_WALLET_OWNER) {
+      // Always after the deal owner's lock, so two reservations can never wait on each other.
+      await lockOwnerSpend(tx, DEMO_WALLET_OWNER);
+      const refusal = demoWalletRefusal(priceMinor, await walletCommittedToday(tx, DEMO_WALLET_OWNER, now, { excludeDealId: deal.id }));
+      if (refusal !== null) {
+        walletOwner = null;
+        await appendAudit(tx, deal.id, [payerFallbackEvent(WALLET_LIMIT_NOTICE[refusal], refusal)], now);
+      }
+    }
+    await upsertPayment(tx, deal.id, newPaymentRecord(ctx.provider.kind, walletOwner === null ? "interactive" : "delegated", priceMinor, now));
+    if (walletOwner !== null) await setPaymentFunding(tx, deal.id, walletOwner);
+    return { walletOwner };
   });
 }
 
@@ -1116,31 +1247,204 @@ function statusAfterOrder(dealId: string, payment: PaymentRecord): DealStatus {
   }
 }
 
-async function orderStep(ctx: ServiceContext, graph: DealGraph, appUrl: string, now: Date): Promise<boolean> {
-  const { deal } = graph;
+/* --------------------- A delegated order with no answer --------------------- */
+
+/**
+ * How long the create-order call of a deal may be resent. PayPal keeps an order's request id
+ * for six hours; after that the same id would open a SECOND order, and against a vaulted wallet
+ * a second hold. The margin covers clock differences and a request that is slow to arrive.
+ */
+const CREATE_ORDER_REPLAY_WINDOW_MS = 5 * 60 * 60 * 1000;
+
+/** The create-order call this deal sent against a delegated wallet, if it ever sent one. */
+function delegatedAttemptOf(operations: readonly PaymentOperation[]): PaymentOperation | null {
+  return operations.find((operation) => operation.kind === "create_order" && operation.request?.delegated === true) ?? null;
+}
+
+/** No answer was ever recorded for it: PayPal may or may not have created — and authorized — the order. */
+function isUnanswered(attempt: PaymentOperation | null): attempt is PaymentOperation {
+  return attempt !== null && (attempt.status === "started" || attempt.status === "failed_retryable");
+}
+
+/** The ledger stamps its rows with the wall clock, so their age is measured against the same clock. */
+function replayWindowPassed(attempt: PaymentOperation): boolean {
+  return Date.now() - Date.parse(attempt.createdAt) > CREATE_ORDER_REPLAY_WINDOW_MS;
+}
+
+/**
+ * The create-order call went to PayPal with a vaulted wallet and no answer came back. With a
+ * vault id PayPal authorizes inside that very call, so the wallet may already carry a hold PACT
+ * has no id for. Such a deal is never written off after a few attempts: it stays where it is,
+ * its reservation keeps counting against the daily limit, and the next attempt resends the same
+ * request id — the only way to learn the order's id and adopt (or release) what it holds.
+ */
+async function awaitDelegatedOutcome(ctx: ServiceContext, graph: DealGraph, payment: PaymentRecord, issue: string, now: Date): Promise<boolean> {
+  const message = `${providerLabel(ctx.provider.kind)} has not answered for this order (${issue}). It was sent against the delegated wallet, so whether funds are held is not known yet — retry the step.`;
+  await commit(
+    ctx,
+    graph.deal,
+    {
+      to: graph.deal.status,
+      events: withoutRecorded(graph.audit, [problemEvent(message, { issue, retryable: true, holdUnknown: true })]),
+      patch: { lastError: message },
+      rows: (tx) => upsertPayment(tx, graph.deal.id, payment),
+    },
+    now,
+  );
+  return false;
+}
+
+/**
+ * The replay window has passed without an answer. Resending now could open a second order, so
+ * the deal is closed — and the trail says in so many words that PayPal may hold an authorization
+ * PACT never learned the id of, and under which invoice id to look for it.
+ */
+async function closeUnconfirmedOrder(ctx: ServiceContext, graph: DealGraph, attempt: PaymentOperation, now: Date): Promise<boolean> {
   const signed = signedOf(graph);
-  const vaultId = await delegatedVaultId(ctx, deal.owner);
-  if (!(await reserveSpend(ctx, graph, vaultId === null ? "interactive" : "delegated", now))) return true;
+  const name = providerLabel(ctx.provider.kind);
+  const priceMinor = signed.contract.price.amountMinor;
+  const invoiceId = paypalInvoiceId(signed);
+  const message = `${name} never confirmed this order, and it can no longer be asked safely. An authorization of ${formatMoney(priceMinor)} may exist at ${name} under invoice ${invoiceId}.`;
+  const closing: AuditEventInput = {
+    actor: "system",
+    type: "deal.failed",
+    title: `Deal failed: ${name} never confirmed the order — an authorization may exist at ${name} that PACT has no record of`,
+    detail: message,
+    data: {
+      issue: attempt.error?.issue ?? null,
+      holdUnknown: true,
+      holdRemains: null,
+      invoiceId,
+      customId: paypalCustomId(signed),
+      amountMinor: priceMinor,
+      idempotencyKey: attempt.key,
+      attempts: attempt.attempts,
+      firstAttemptAt: attempt.createdAt,
+    },
+  };
+  await commit(ctx, graph.deal, { to: "failed", events: [closing], patch: { lastError: message } }, now);
+  log.error("deal.order_unconfirmed", { dealId: graph.deal.id, invoiceId, attempts: attempt.attempts });
+  return true;
+}
 
-  let step: PaymentStepResult;
-  try {
-    step = await openOrder(paymentDeps(ctx), {
-      dealId: deal.id,
-      signed,
-      // The return is never trusted: it only prompts PACT to ask the provider what happened.
-      returnUrl: `${appUrl}/api/paypal/return?deal=${deal.id}`,
-      cancelUrl: `${appUrl}/api/paypal/cancel?deal=${deal.id}`,
-      ...(vaultId === null ? {} : { vaultId }),
-    });
-  } catch (error) {
-    if (!(error instanceof PaymentStepError)) throw error;
-    return settlePaymentError(ctx, graph, error, ORDER_OPERATIONS, "The order could not be completed, so it was abandoned.", now);
+/* ------------------- A delegated wallet PayPal will not charge ------------------ */
+
+/** PayPal's refusals that mean the vault token itself is gone: no deal can use this wallet again. */
+const DEAD_WALLET_ISSUES: ReadonlySet<string> = new Set([
+  "INVALID_VAULT_ID",
+  "TOKEN_ID_NOT_FOUND",
+  "TOKEN_EXPIRED",
+  "AGREEMENT_ALREADY_CANCELLED",
+  "BILLING_AGREEMENT_NOT_FOUND",
+]);
+/** Refusals about this one payment: the wallet stays, the payer is asked for this deal only. */
+const PAYER_NEEDED_ISSUES: ReadonlySet<string> = new Set(["PAYER_ACTION_REQUIRED", "PAYMENT_SOURCE_CANNOT_BE_USED", "INSTRUMENT_DECLINED"]);
+
+function isWalletRefusal(issue: string | null | undefined): issue is string {
+  return typeof issue === "string" && (DEAD_WALLET_ISSUES.has(issue) || PAYER_NEEDED_ISSUES.has(issue));
+}
+
+function walletRefusalNotice(kind: ProviderKind, issue: string): AuditEventInput {
+  return payerFallbackEvent(
+    `${providerLabel(kind)} would not charge the delegated wallet (${issue}), so the payer approves this order in PayPal instead`,
+    issue,
+  );
+}
+
+/**
+ * PayPal refused to charge the wallet. Nothing is held, and the refusal is about the payment
+ * source, not about the deal — so the deal carries on with the payer's own approval instead of
+ * failing. A wallet whose token is dead is retired, or every later deal would hit the same wall.
+ */
+async function releaseRefusedWallet(ctx: ServiceContext, dealId: string, wallet: WalletChoice, issue: string): Promise<void> {
+  if (DEAD_WALLET_ISSUES.has(issue)) {
+    await deleteWallet(ctx.db, wallet.owner);
+    log.warn("wallet.retired", { scope: wallet.owner === DEMO_WALLET_OWNER ? "demo" : "session", issue });
   }
+  // The payer's own account pays from here on: the order no longer counts against the wallet.
+  await setPaymentFunding(ctx.db, dealId, null);
+}
 
+interface OrderUrls {
+  returnUrl: string;
+  cancelUrl: string;
+}
+
+async function commitOrder(ctx: ServiceContext, graph: DealGraph, step: PaymentStepResult, now: Date): Promise<boolean> {
+  const { deal } = graph;
   const to = statusAfterOrder(deal.id, step.payment);
   const lastError = to === "failed" ? `${providerLabel(ctx.provider.kind)} would not open the order. The deal cannot continue.` : null;
   await commit(ctx, deal, { to, events: step.events, patch: { lastError }, rows: (tx) => upsertPayment(tx, deal.id, step.payment) }, now);
   return true;
+}
+
+/**
+ * Open the order for the payer's approval. `refusedBy` is set when this replaces a delegated
+ * attempt PayPal refused: the order then goes out under its own idempotency key (the deal's
+ * first key belongs to the refused attempt), and the trail says why the payer is being asked.
+ */
+async function openForPayer(ctx: ServiceContext, graph: DealGraph, urls: OrderUrls, refusedBy: string | null, now: Date): Promise<boolean> {
+  const { deal } = graph;
+  const notices = refusedBy === null ? [] : withoutRecorded(graph.audit, [walletRefusalNotice(ctx.provider.kind, refusedBy)]);
+  let step: PaymentStepResult;
+  try {
+    step = await openOrder(paymentDeps(ctx), { dealId: deal.id, signed: signedOf(graph), ...urls, interactiveFallback: refusedBy !== null });
+  } catch (error) {
+    if (!(error instanceof PaymentStepError)) throw error;
+    const withNotices = new PaymentStepError(error, error.payment, [...notices, ...error.events]);
+    return settlePaymentError(ctx, graph, withNotices, ORDER_OPERATIONS, "The order could not be completed, so it was abandoned.", now);
+  }
+  return commitOrder(ctx, graph, { payment: step.payment, events: [...notices, ...step.events] }, now);
+}
+
+async function orderStep(ctx: ServiceContext, graph: DealGraph, appUrl: string, now: Date): Promise<boolean> {
+  const { deal } = graph;
+  const signed = signedOf(graph);
+  const candidate = await delegatedWallet(ctx, deal.owner);
+  const reservation = await reserveSpend(ctx, graph, candidate, now);
+  if (reservation === null) return true;
+
+  // The return is never trusted: it only prompts PACT to ask the provider what happened.
+  const urls: OrderUrls = { returnUrl: `${appUrl}/api/paypal/return?deal=${deal.id}`, cancelUrl: `${appUrl}/api/paypal/cancel?deal=${deal.id}` };
+  const attempt = delegatedAttemptOf(await listPaymentOperations(ctx.db, deal.id));
+  if (isUnanswered(attempt) && replayWindowPassed(attempt)) return closeUnconfirmedOrder(ctx, graph, attempt, now);
+  // An earlier attempt was refused by PayPal as a payment source: the payer is asked from then on.
+  const refusedEarlier = attempt?.status === "failed" ? attempt.error?.issue : null;
+  if (isWalletRefusal(refusedEarlier)) return openForPayer(ctx, graph, urls, refusedEarlier, now);
+
+  let wallet: WalletChoice | null = null;
+  if (reservation.walletOwner !== null) {
+    wallet = candidate?.owner === reservation.walletOwner ? candidate : await activeWallet(ctx, reservation.walletOwner);
+    if (wallet === null) {
+      // The wallet was disconnected after the reservation. If a request already went out against
+      // it, that request cannot be repeated without the vault id and must not be replaced.
+      const reserved = await getPayment(ctx.db, deal.id);
+      if (isUnanswered(attempt) && reserved !== null) return awaitDelegatedOutcome(ctx, graph, reserved, attempt.error?.issue ?? "NO_ANSWER", now);
+      await setPaymentFunding(ctx.db, deal.id, null);
+    }
+  }
+  if (wallet === null) return openForPayer(ctx, graph, urls, null, now);
+
+  let step: PaymentStepResult;
+  try {
+    step = await openOrder(paymentDeps(ctx), { dealId: deal.id, signed, ...urls, vaultId: wallet.vaultId });
+  } catch (error) {
+    if (!(error instanceof PaymentStepError)) throw error;
+    // The create call itself has no answer (no order id on the record) and the attempts are used
+    // up: for an interactive order that is where the engine gives up, for this one it must not.
+    const unanswered = error.retryable && error.payment.status === "none" && error.payment.orderId === null;
+    if (unanswered && (await attemptsExhausted(ctx, deal.id, ORDER_OPERATIONS))) {
+      return awaitDelegatedOutcome(ctx, graph, error.payment, error.issue, now);
+    }
+    return settlePaymentError(ctx, graph, error, ORDER_OPERATIONS, "The order could not be completed, so it was abandoned.", now);
+  }
+
+  const refusal = step.payment.status === "failed" && step.payment.orderId === null ? step.payment.lastError?.issue : null;
+  if (isWalletRefusal(refusal)) {
+    await releaseRefusedWallet(ctx, deal.id, wallet, refusal);
+    return openForPayer(ctx, graph, urls, refusal, now);
+  }
+  return commitOrder(ctx, graph, step, now);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1390,8 +1694,7 @@ async function refuseCapture(ctx: ServiceContext, graph: DealGraph, violations: 
     return true;
   }
   const releaseReason = "Capture was blocked by the settlement guard, so the authorization was released.";
-  await failDeal(ctx, graph, { payment, events: [blockedEvent(violations)], message, releaseReason }, now);
-  return true;
+  return failDeal(ctx, graph, { payment, events: [blockedEvent(violations)], message, issue: null, releaseReason }, now);
 }
 
 /** The provider said the authorization was captured but does not show it: nobody knows yet whether money moved. */
@@ -1453,9 +1756,8 @@ async function settleCapture(ctx: ServiceContext, graph: DealGraph, held: Paymen
     case "failed": {
       // The provider refused the capture for good. The record the capture was made from is still the hold to release.
       const message = `${providerLabel(ctx.provider.kind)} refused the capture. Nothing was captured.`;
-      const failure = { payment: held, events: step.events, message, releaseReason: HOLD_RELEASED_AFTER_CAPTURE_FAILURE };
-      await failDeal(ctx, graph, failure, now);
-      return true;
+      const issue = step.payment.lastError?.issue ?? null;
+      return failDeal(ctx, graph, { payment: held, events: step.events, message, issue, releaseReason: HOLD_RELEASED_AFTER_CAPTURE_FAILURE }, now);
     }
     case null:
       if (step.payment.status !== "authorized") throw broken(deal.id, `a capture attempt left the payment ${step.payment.status}`);
@@ -1554,8 +1856,17 @@ async function voidStep(ctx: ServiceContext, graph: DealGraph, now: Date): Promi
     step = await voidHeldFunds(paymentDeps(ctx), { dealId: deal.id, payment, reason });
   } catch (error) {
     if (!(error instanceof PaymentStepError)) throw error;
+    if (error.retryable) {
+      // Never given up on. "rejecting" has no other way out, and repeating a void is safe for as
+      // long as it takes: the provider answers a second void of the same authorization with
+      // "already voided", which the orchestrator counts as done. Giving up here would leave the
+      // payer's money on hold behind a terminal deal that nothing could release any more.
+      await stayPut(ctx, graph, error, now);
+      return false;
+    }
     // Releasing the hold is the step that failed, so there is no second release to attempt.
-    return settlePaymentError(ctx, graph, error, VOID_OPERATIONS, null, now);
+    const message = failureMessage(ctx.provider.kind, error);
+    return failDeal(ctx, graph, { payment: error.payment, events: error.events, message, issue: error.issue, releaseReason: null }, now);
   }
   await commit(
     ctx,
@@ -1652,14 +1963,42 @@ export async function advanceDeal(ctx: ServiceContext, sessionId: string, dealId
   assertOwner(deal, sessionId);
   assertAppUrl(appUrl);
   await limitSession(ctx, RATE_LIMITS.advancePerSession, sessionId);
+  return advanceUnderLease(ctx, deal, sessionId, appUrl, "owner");
+}
 
+/**
+ * The same single step, run by the system instead of the deal's owner.
+ *
+ * A deal's steps are normally driven by its owner's browser. Once money is held, settlement must
+ * not depend on that tab staying open: the seller has delivered, and the payer's funds sit on
+ * hold until someone verifies and captures (or releases) them. This entry point is for the
+ * scheduled sweep only — it is not reachable with a session, skips the owner check and the
+ * per-session rate limit, and goes through exactly the machinery of {@link advanceDeal}: the
+ * lease and the idempotency keys are what make a second driver safe.
+ *
+ * @throws ApiError 404 (unknown deal), 409 (the deal changed under the step).
+ */
+export async function advanceAsSystem(ctx: ServiceContext, dealId: string, appUrl: string): Promise<AdvanceResponse> {
+  const deal = await loadDeal(ctx.db, dealId);
+  assertAppUrl(appUrl);
+  return advanceUnderLease(ctx, deal, null, appUrl, "system");
+}
+
+async function advanceUnderLease(
+  ctx: ServiceContext,
+  deal: DealRow,
+  viewerSessionId: string | null,
+  appUrl: string,
+  driver: "owner" | "system",
+): Promise<AdvanceResponse> {
+  const dealId = deal.id;
   // A cheap first look; the step itself re-reads everything once it holds the lease.
-  if (!isAuto(deal.status)) return { deal: await getDealView(ctx, sessionId, dealId), executed: null, busy: false };
+  if (!isAuto(deal.status)) return { deal: await getDealView(ctx, viewerSessionId, dealId), executed: null, busy: false };
   const lockId = await takeLease(ctx, dealId);
-  if (lockId === null) return { deal: await getDealView(ctx, sessionId, dealId), executed: null, busy: true };
+  if (lockId === null) return { deal: await getDealView(ctx, viewerSessionId, dealId), executed: null, busy: true };
   const executed = await underLease(ctx, dealId, lockId, () => runStep(ctx, dealId, appUrl));
-  const view = await getDealView(ctx, sessionId, dealId);
-  log.info("deal.step", { dealId, from: deal.status, executed, status: view.status });
+  const view = await getDealView(ctx, viewerSessionId, dealId);
+  log.info("deal.step", { dealId, from: deal.status, executed, status: view.status, driver });
   return { deal: view, executed, busy: false };
 }
 
@@ -1819,12 +2158,33 @@ export function payPalReturnPath(dealId: string | null, result: PayPalReturnResu
 
 const ORDER_MISMATCH_NOTE = "A return from the payment provider named a different order than this deal's and was ignored";
 
-/** Leave one trace of a return that named someone else's order. Changes nothing else. */
-async function noteOrderMismatch(ctx: ServiceContext, graph: DealGraph): Promise<void> {
-  const events = withoutRecorded(graph.audit, [problemEvent(ORDER_MISMATCH_NOTE)]);
-  if (events.length === 0) return;
-  await withTransaction(ctx.db, async (tx) => {
-    await appendAudit(tx, graph.deal.id, events, ctx.now());
+/**
+ * Leave one trace of a return that named someone else's order — where it means something.
+ *
+ * The return URL needs no session, so anyone holding a deal id can produce this. The note is
+ * therefore written only for a deal that is actually waiting for its payer (a finished deal and
+ * the public showcase deals stay exactly as they are), under the deal's lease so it can never
+ * race a step for the next audit sequence number, and after re-reading the trail inside the
+ * lease so a burst of such returns still leaves one note. It is a courtesy, never a duty: a busy
+ * deal or a lost race simply goes without it.
+ */
+async function noteOrderMismatch(ctx: ServiceContext, deal: DealRow): Promise<void> {
+  if (deal.status !== "awaiting_payment" || deal.owner === SYSTEM_OWNER) {
+    log.info("deal.return_order_mismatch", { dealId: deal.id, noted: false });
+    return;
+  }
+  const lockId = await takeLease(ctx, deal.id);
+  if (lockId === null) return;
+  await underLease(ctx, deal.id, lockId, async () => {
+    const fresh = await loadGraph(ctx.db, deal.id);
+    const events = fresh.deal.status === "awaiting_payment" ? withoutRecorded(fresh.audit, [problemEvent(ORDER_MISMATCH_NOTE)]) : [];
+    if (events.length === 0) return;
+    try {
+      await withTransaction(ctx.db, (tx) => appendAudit(tx, deal.id, events, ctx.now()));
+    } catch (error) {
+      if (!(error instanceof DuplicateError)) throw error;
+      log.info("deal.return_order_mismatch", { dealId: deal.id, noted: false });
+    }
   });
 }
 
@@ -1872,8 +2232,8 @@ async function settleApprovalError(ctx: ServiceContext, graph: DealGraph, error:
   }
   const message = failureMessage(ctx.provider.kind, error);
   const releaseReason = "The order could not be authorized against this contract, so it was abandoned.";
-  await failDeal(ctx, graph, { payment: error.payment, events: error.events, message, releaseReason }, now);
-  return "failed";
+  const closed = await failDeal(ctx, graph, { payment: error.payment, events: error.events, message, issue: error.issue, releaseReason }, now);
+  return closed ? "failed" : "pending";
 }
 
 async function authorizeUnderLease(ctx: ServiceContext, dealId: string, orderId: string | null): Promise<ApprovalOutcome> {
@@ -1913,7 +2273,7 @@ export async function completePayPalApproval(
   const stored = graph.payment?.orderId ?? null;
   if (stored === null) return { dealId, outcome: "failed" };
   if (orderId !== null && orderId !== stored) {
-    await noteOrderMismatch(ctx, graph);
+    await noteOrderMismatch(ctx, graph.deal);
     return { dealId, outcome: "failed" };
   }
   // Only a deal that waits for the payer has anything to authorize; the rest is answered from the record.
@@ -1971,10 +2331,16 @@ function parseJsonObject(rawBody: string): Record<string, unknown> | null {
   }
 }
 
+/** What PACT writes into an order's custom_id: the contract's terms hash behind a versioned prefix. */
+const BOUND_CUSTOM_ID = /^pact:v1:([a-f0-9]{64})$/;
+
 /**
- * The deal an event is about. Every id the event carries is tried: the capture or authorization
- * id may not be stored yet when PayPal's event overtakes the step that created it, but the
- * order id always is.
+ * The deal an event is about. Every PayPal id the event carries is tried first. The interactive
+ * flow stores the order id before the payer ever sees PayPal; the delegated flow stores it in
+ * the same commit as the authorization — so PayPal's event can overtake that commit, or arrive
+ * for an order whose answer PACT never received. Such an event still names its deal through the
+ * binding PACT put on the order: invoice_id is the contract id and custom_id carries the terms
+ * hash. Both must point at the same contract.
  */
 async function findDealForEvent(db: Db, effect: WebhookEffect): Promise<string | null> {
   if (effect.orderId !== null) {
@@ -1985,23 +2351,39 @@ async function findDealForEvent(db: Db, effect: WebhookEffect): Promise<string |
     const byAuthorization = await findDealIdByAuthorizationId(db, effect.authorizationId);
     if (byAuthorization !== null) return byAuthorization;
   }
-  return effect.captureId === null ? null : findDealIdByCaptureId(db, effect.captureId);
+  if (effect.captureId !== null) {
+    const byCapture = await findDealIdByCaptureId(db, effect.captureId);
+    if (byCapture !== null) return byCapture;
+  }
+  const termsHash = effect.customId === null ? undefined : BOUND_CUSTOM_ID.exec(effect.customId)?.[1];
+  if (termsHash === undefined || effect.invoiceId === null) return null;
+  return findDealIdByContractBinding(db, { contractId: effect.invoiceId, termsHash });
+}
+
+interface EventApplication {
+  /** An earlier delivery had already done all this. */
+  duplicate: boolean;
+  /** The event made PACT record a hold on a deal that had already been closed as failed. */
+  heldOnFailedDeal: boolean;
 }
 
 /**
  * Fold a verified event into the deal, under its lease and in one transaction: the payment row
  * is locked, the event applied (forward along the payment state machine or not at all), the
  * audit trail extended, the deal moved if the new payment state demands it, and the delivery
- * marked processed. Returns true when an earlier delivery had already done all this.
+ * marked processed.
  */
-async function applyEvent(ctx: ServiceContext, dealId: string, effect: WebhookEffect): Promise<boolean> {
+async function applyEvent(ctx: ServiceContext, dealId: string, effect: WebhookEffect): Promise<EventApplication> {
   const now = ctx.now();
   return withTransaction(ctx.db, async (tx) => {
-    if ((await getWebhookEvent(tx, effect.eventId))?.processed) return true;
+    if ((await getWebhookEvent(tx, effect.eventId))?.processed) return { duplicate: true, heldOnFailedDeal: false };
     const payment = await getPayment(tx, dealId, { forUpdate: true });
     const deal = await getDeal(tx, dealId);
+    let heldOnFailedDeal = false;
     if (payment !== null && deal !== null) {
-      const applied = applyWebhookEffect(payment, effect, now);
+      const signed = await getContractByDeal(tx, dealId);
+      const boundToContract = signed !== null && effect.customId === paypalCustomId(signed) && effect.invoiceId === paypalInvoiceId(signed);
+      const applied = applyWebhookEffect(payment, effect, now, { boundToContract });
       if (applied.changed) await upsertPayment(tx, dealId, applied.payment);
       const to = dealStatusForPayment(deal.status, applied.payment);
       const events = to === null ? applied.events : [...applied.events, ...paymentDrivenEvents(to, applied.payment)];
@@ -2011,10 +2393,27 @@ async function applyEvent(ctx: ServiceContext, dealId: string, effect: WebhookEf
         const patch = { status: to, lastError: null, updatedAt: now.toISOString() };
         if ((await updateDeal(tx, dealId, deal.version, patch)) === null) throw staleDeal();
       }
+      heldOnFailedDeal = deal.status === "failed" && payment.status !== "authorized" && applied.payment.status === "authorized";
     }
     await markWebhookProcessed(tx, effect.eventId, dealId);
-    return false;
+    return { duplicate: false, heldOnFailedDeal };
   });
+}
+
+/**
+ * A deal was closed as failed while its delegated order had no answer, and PayPal's webhook has
+ * now shown that the order did authorize. Nobody will ever capture that hold, so it is released
+ * here and now, under the same lease. A release that does not go through leaves the payment
+ * recorded as authorized, which is at least the truth, and the trail says why.
+ */
+async function releaseHoldOnFailedDeal(ctx: ServiceContext, dealId: string): Promise<void> {
+  const graph = await loadGraph(ctx.db, dealId);
+  if (graph.deal.status !== "failed" || graph.payment?.status !== "authorized") return;
+  const reason = "The deal had already been closed when PayPal reported this authorization, so it was released.";
+  const released = await releaseHold(ctx, dealId, graph.payment, reason);
+  const events = withoutRecorded(graph.audit, released.events);
+  if (events.length === 0) return;
+  await commit(ctx, graph.deal, { to: graph.deal.status, events, rows: (tx) => upsertPayment(tx, dealId, released.payment) }, ctx.now());
 }
 
 async function processEvent(ctx: ServiceContext, effect: WebhookEffect): Promise<WebhookOutcome> {
@@ -2027,7 +2426,11 @@ async function processEvent(ctx: ServiceContext, effect: WebhookEffect): Promise
   const lockId = await takeLeasePatiently(ctx, dealId);
   // Not acknowledged and not marked processed: PayPal redelivers, and by then the running step has finished.
   if (lockId === null) return { accepted: false, duplicate: false, reason: "busy" };
-  const duplicate = await underLease(ctx, dealId, lockId, () => applyEvent(ctx, dealId, effect));
+  const { duplicate } = await underLease(ctx, dealId, lockId, async () => {
+    const applied = await applyEvent(ctx, dealId, effect);
+    if (applied.heldOnFailedDeal) await releaseHoldOnFailedDeal(ctx, dealId);
+    return applied;
+  });
   log.info("webhook.applied", { dealId, eventId: effect.eventId, eventType: effect.eventType, duplicate });
   return { accepted: true, duplicate, reason: null };
 }
@@ -2037,15 +2440,19 @@ async function processEvent(ctx: ServiceContext, effect: WebhookEffect): Promise
  * signature is computed over them.
  *
  * An event whose signature does not verify changes nothing and writes nothing. A verified event
- * is recorded under PayPal's event id (so a redelivery is recognised), interpreted, matched to a
- * deal by the PayPal ids PACT already holds, and applied once. `accepted: false` asks the route
+ * is recorded under PayPal's event id (so a redelivery is recognised) — as a projection of the
+ * fields PACT reads, never the body itself, which can carry the payer's name and e-mail address —
+ * then interpreted, matched to a deal by the PayPal ids PACT already holds (or by the contract
+ * binding on the order), and applied once. `accepted: false` asks the route
  * to answer with an error status; with reason "busy" that is deliberate — the deal is in the
  * middle of a step, and PayPal's redelivery is how the event gets applied.
  */
 export async function handlePayPalWebhook(ctx: ServiceContext, headers: Headers, rawBody: string): Promise<WebhookOutcome> {
   let verification: WebhookVerification;
   try {
-    verification = await ctx.provider.verifyWebhook(headers, rawBody);
+    // Unauthenticated at this point: what verifying may cost in outbound calls is budgeted for the whole deployment.
+    const mayCallOut = (): Promise<boolean> => withinRule(ctx, RATE_LIMITS.webhookVerificationGlobal, GLOBAL_SUBJECT);
+    verification = await ctx.provider.verifyWebhook(headers, rawBody, { mayCallOut });
   } catch (error) {
     if (!(error instanceof PaymentError)) throw error;
     return rejected(`verification_unavailable:${error.issue}`);
@@ -2063,7 +2470,7 @@ export async function handlePayPalWebhook(ctx: ServiceContext, headers: Headers,
     resourceId: effect.resourceId,
     verified: true,
     verificationMethod: verification.method,
-    payload,
+    payload: storedWebhookPayload(payload),
     receivedAt: ctx.now().toISOString(),
   });
   if (delivery.processed) return { accepted: true, duplicate: true, reason: null };

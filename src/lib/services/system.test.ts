@@ -9,7 +9,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReconciliationView, WalletStatus } from "@/lib/api/dto";
 import { APP_VERSION } from "@/lib/config";
-import type { Db, DealGraph } from "@/lib/db";
+import { closeDb, createTestDb, type Db, type DealGraph } from "@/lib/db";
 import {
   AUDIT_ACTORS,
   AUDIT_EVENT_TYPES,
@@ -146,6 +146,44 @@ describe("getSystemStatus without a reachable database", () => {
   });
 });
 
+describe("getSystemStatus on a database that forgets", () => {
+  let db: Db;
+
+  beforeEach(async () => {
+    vi.stubEnv("PACT_LOG_SILENT", "1");
+    for (const name of ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_WEBHOOK_ID", "PAYPAL_API_BASE", "PACT_PAYMENT_MODE", "DATABASE_URL", "POSTGRES_URL", "PGLITE_DIR"]) {
+      vi.stubEnv(name, "");
+    }
+    db = await createTestDb();
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await closeDb(db);
+  });
+
+  it("is healthy for keyless development and the end-to-end tests: simulated payments lose nothing real", async () => {
+    const status = await getSystemStatus({ openDb: async () => db });
+    expect(status).toMatchObject({ payments: { provider: "simulated" }, database: "pglite" });
+    expect(status.degraded).toBeUndefined();
+  });
+
+  it("is degraded once real PayPal holds would be recorded in memory only", async () => {
+    vi.stubEnv("PAYPAL_CLIENT_ID", SECRETS.clientId);
+    vi.stubEnv("PAYPAL_CLIENT_SECRET", SECRETS.clientSecret);
+    const status = await getSystemStatus({ openDb: async () => db });
+    expect(status).toMatchObject({ payments: { provider: "paypal_sandbox", configured: true }, database: "pglite" });
+    expect(status.degraded).toEqual(["database"]);
+
+    // A data directory or a Postgres URL makes the record durable.
+    vi.stubEnv("PGLITE_DIR", "/var/lib/pact");
+    expect((await getSystemStatus({ openDb: async () => db })).degraded).toBeUndefined();
+    vi.stubEnv("PGLITE_DIR", "");
+    vi.stubEnv("DATABASE_URL", SECRETS.databaseUrl);
+    expect((await getSystemStatus({ openDb: async () => db })).degraded).toBeUndefined();
+  });
+});
+
 /* -------------------------------------------------------------------------- */
 /*  public/openapi.json                                                        */
 /* -------------------------------------------------------------------------- */
@@ -223,7 +261,8 @@ describe("public/openapi.json", () => {
   it("is an OpenAPI 3.1 document for this version of PACT", () => {
     expect(spec.openapi).toBe("3.1.0");
     expect(at(spec, "info")).toMatchObject({ title: expect.stringContaining("PACT"), version: APP_VERSION });
-    expect(Object.keys(at(spec, "components", "securitySchemes")).sort()).toEqual(["adminToken", "session"]);
+    expect(Object.keys(at(spec, "components", "securitySchemes")).sort()).toEqual(["adminToken", "cronSecret", "session"]);
+    expect(at(spec, "components", "securitySchemes", "cronSecret")).toMatchObject({ type: "http", scheme: "bearer" });
     expect(at(spec, "components", "securitySchemes", "session")).toMatchObject({ type: "apiKey", in: "cookie", name: "pact_sid" });
     expect(at(spec, "components", "securitySchemes", "adminToken")).toMatchObject({ type: "apiKey", in: "header", name: "x-admin-token" });
   });
@@ -240,6 +279,9 @@ describe("public/openapi.json", () => {
         "GET /api/deals/{id}/artifacts/{artifactId}",
         "POST /api/deals/{id}/reconcile",
         "GET /api/operations",
+        "GET /api/ops/ai",
+        "POST /api/ops/ai",
+        "GET /api/cron/sweep",
         "GET /api/policy",
         "PUT /api/policy",
         "GET /api/wallet",

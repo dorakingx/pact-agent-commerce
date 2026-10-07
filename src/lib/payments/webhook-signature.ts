@@ -19,6 +19,10 @@ export const MAX_TRANSMISSION_SKEW_MS = 10 * 60 * 1000;
 export const SUPPORTED_AUTH_ALGO = "SHA256withRSA";
 
 const MAX_CACHED_CERTIFICATES = 8;
+/** How long a certificate URL that could not be loaded is left alone. */
+const FAILED_FETCH_TTL_MS = 5 * 60 * 1000;
+/** Bounded like the key cache: the URL is attacker-chosen, so the list of failures must not grow with the attack. */
+const MAX_REMEMBERED_FAILURES = 256;
 
 export interface WebhookSignatureHeaders {
   transmissionId: string;
@@ -80,31 +84,53 @@ export function verifySignature(key: KeyObject, message: string, signatureBase64
 export interface CertificateFetchOptions {
   fetchImpl: typeof fetch;
   timeoutMs: number;
+  /** Epoch milliseconds; defaults to the wall clock. */
+  now?: () => number;
+}
+
+function evictOldest<K, V>(map: Map<K, V>): void {
+  const oldest = map.keys().next();
+  if (!oldest.done) map.delete(oldest.value);
 }
 
 /**
  * In-memory cache of PayPal's signing keys, keyed by certificate URL. PayPal rotates the
  * certificate rarely and under a new URL, so entries never need to be refreshed — only bounded.
+ *
+ * A URL that could not be loaded is remembered too, for a few minutes: the header that names it
+ * is attacker-controlled, and without that memory every forged delivery naming the same dead URL
+ * would cost another outbound request.
  */
 export class CertificateCache {
   private readonly keys = new Map<string, KeyObject>();
+  /** Certificate URL → epoch ms until which it is not fetched again. */
+  private readonly failures = new Map<string, number>();
 
   constructor(private readonly options: CertificateFetchOptions) {}
 
   /**
    * Public key of the certificate at `certUrl`, or null when it cannot be fetched or parsed
    * (the caller then falls back to PayPal's postback verification).
-   * The caller must have checked `isTrustedCertUrl` first.
+   * The caller must have checked `isTrustedCertUrl` first. `mayFetch` is asked before a request
+   * is made; a cached key costs nothing and is returned without asking.
    */
-  async load(certUrl: string): Promise<KeyObject | null> {
+  async load(certUrl: string, mayFetch: () => Promise<boolean> = async () => true): Promise<KeyObject | null> {
     const cached = this.keys.get(certUrl);
     if (cached) return cached;
-    const key = await this.fetchKey(certUrl);
-    if (key === null) return null;
-    if (this.keys.size >= MAX_CACHED_CERTIFICATES) {
-      const oldest = this.keys.keys().next();
-      if (!oldest.done) this.keys.delete(oldest.value);
+    const now = (this.options.now ?? Date.now)();
+    const retryAt = this.failures.get(certUrl);
+    if (retryAt !== undefined) {
+      if (now < retryAt) return null;
+      this.failures.delete(certUrl);
     }
+    if (!(await mayFetch())) return null;
+    const key = await this.fetchKey(certUrl);
+    if (key === null) {
+      if (this.failures.size >= MAX_REMEMBERED_FAILURES) evictOldest(this.failures);
+      this.failures.set(certUrl, now + FAILED_FETCH_TTL_MS);
+      return null;
+    }
+    if (this.keys.size >= MAX_CACHED_CERTIFICATES) evictOldest(this.keys);
     this.keys.set(certUrl, key);
     return key;
   }

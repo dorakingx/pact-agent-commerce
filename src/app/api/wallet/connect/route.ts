@@ -10,7 +10,7 @@ import { getAppUrl } from "@/lib/config";
 import { getServiceContext } from "@/lib/services/context";
 import { forbidden } from "@/lib/services/errors";
 import { clientKey, json, readJson, requestOrigin, route } from "@/lib/services/http";
-import { enforceRateLimit, rateLimitKey } from "@/lib/services/rate-limit";
+import { RATE_LIMITS, UNKNOWN_CLIENT, enforceRateLimit, enforceRule, rateLimitKey } from "@/lib/services/rate-limit";
 import { ensureSession } from "@/lib/services/session";
 import {
   ADMIN_TOKEN_HEADER,
@@ -28,6 +28,10 @@ const ConnectSchema = z.strictObject({ scope: z.enum(WALLET_SCOPES) });
 export const POST = route("wallet.connect", async (request) => {
   const { scope } = await readJson(request, ConnectSchema, 1_024);
   const ctx = await getServiceContext();
+  const address = clientKey(request) ?? UNKNOWN_CLIENT;
+  // Per address before per session: a client that never returns the cookie gets a new session,
+  // and with it a new per-session budget, on every call — each of which asks PayPal for a token.
+  await enforceRule(ctx, RATE_LIMITS.walletConnectPerClient, address);
   const sessionId = await ensureSession();
   await enforceRateLimit(
     ctx,
@@ -38,7 +42,7 @@ export const POST = route("wallet.connect", async (request) => {
   if (scope === "demo") {
     // Guessing the operator token is throttled per network address: a new session is free, an address is not.
     const { scope: rule, limit, windowSeconds } = OPERATOR_ATTEMPT_LIMIT;
-    await enforceRateLimit(ctx, rateLimitKey(rule, clientKey(request) ?? "unknown"), limit, windowSeconds);
+    await enforceRateLimit(ctx, rateLimitKey(rule, address), limit, windowSeconds);
   }
   const owner = resolveWalletOwner({ scope, sessionId, adminToken: request.headers.get(ADMIN_TOKEN_HEADER) });
   if (owner === null) throw forbidden();

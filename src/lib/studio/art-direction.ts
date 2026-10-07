@@ -264,6 +264,7 @@ export async function aiArtDirection(
     paletteFor(subject, style);
   const order = motifOrder(subject);
   const used = new Set<Motif>();
+  const ownWords = style === null ? [subject] : [subject, style];
   let replaced = 0;
 
   const directions = Array.from({ length: count }, (_, i): ArtDirection => {
@@ -273,8 +274,9 @@ export async function aiArtDirection(
     const title = proposal === undefined ? "" : clampText(singleLine(proposal.title), MAX_TITLE_CHARS);
     const description = proposal === undefined ? "" : clampText(singleLine(proposal.description), MAX_DESCRIPTION_CHARS);
     const repeats = proposed !== undefined && used.has(proposed) && used.size < MOTIFS.length;
-    // Wording that reads like an instruction to a reviewer would get an honest file flagged.
-    const worded = title !== "" && description !== "" && scanText({ where: "description", text: `${title}\n${description}` }).length === 0;
+    // Wording that reads like an instruction to a reviewer would get an honest file flagged. The
+    // client's own subject and style are exempt, exactly as they are when the delivery is verified.
+    const worded = title !== "" && description !== "" && scanText({ where: "description", text: `${title}\n${description}` }, { ownWords }).length === 0;
     if (proposed !== undefined && !repeats && worded) {
       used.add(proposed);
       return { motif: proposed, palette, title, description, seed: seedFor(subject, index) };

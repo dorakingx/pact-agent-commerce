@@ -44,6 +44,14 @@ describe("RATE_LIMITS", () => {
     expect(RATE_LIMITS.approvalReturnPerDeal).toMatchObject({ limit: 30, windowSeconds: 600 });
   });
 
+  it("backs every per-session rule a new cookie could reset with a per-address rule", () => {
+    expect(RATE_LIMITS.policyUpdatePerClient).toMatchObject({ limit: 120, windowSeconds: 3600 });
+    expect(RATE_LIMITS.walletConnectPerClient).toMatchObject({ limit: 30, windowSeconds: 3600 });
+    expect(RATE_LIMITS.reconcilePerClient).toMatchObject({ limit: 36, windowSeconds: 600 });
+    expect(RATE_LIMITS.narratedReconcileGlobal).toMatchObject({ limit: 120, windowSeconds: 3600 });
+    expect(RATE_LIMITS.webhookVerificationGlobal).toMatchObject({ limit: 30, windowSeconds: 60 });
+  });
+
   it("gives every rule its own counter", () => {
     const scopes = Object.values(RATE_LIMITS).map((rule) => rule.scope);
     expect(new Set(scopes).size).toBe(scopes.length);

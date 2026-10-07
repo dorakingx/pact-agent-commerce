@@ -8,6 +8,13 @@
       "when": 1791220474164,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791239506997,
+      "tag": "0001_payment_wallet_owner",
+      "breakpoints": true
     }
   ]
 }

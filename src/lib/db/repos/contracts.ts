@@ -1,6 +1,6 @@
 /** Signed contracts: one immutable, hashed document per deal. */
 import "server-only";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { SignedContractSchema, type SignedContract } from "../../domain/schemas";
 import type { Db } from "../client";
 import { dbCall } from "../errors";
@@ -37,5 +37,21 @@ export function getContractByDeal(db: Db, dealId: string): Promise<SignedContrac
   return dbCall("getContractByDeal", async () => {
     const [row] = await db.select().from(contracts).where(eq(contracts.dealId, dealId)).limit(1);
     return row ? toSignedContract(row) : null;
+  });
+}
+
+/**
+ * The deal a PayPal resource is bound to through the fields PACT put on the order: invoice_id is
+ * the contract id and custom_id carries the terms hash. Both must name the same contract, so an
+ * event that merely quotes one of them cannot be attached to a deal.
+ */
+export function findDealIdByContractBinding(db: Db, binding: { contractId: string; termsHash: string }): Promise<string | null> {
+  return dbCall("findDealIdByContractBinding", async () => {
+    const [row] = await db
+      .select({ dealId: contracts.dealId })
+      .from(contracts)
+      .where(and(eq(contracts.id, binding.contractId), eq(contracts.termsHash, binding.termsHash)))
+      .limit(1);
+    return row?.dealId ?? null;
   });
 }

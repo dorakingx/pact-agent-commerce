@@ -191,6 +191,10 @@ async function openConfigured(): Promise<DbHandle> {
   const dataDir = process.env.PGLITE_DIR?.trim() || undefined;
   const handle = await openPglite({ dataDir });
   log.info("db.ready", { kind: "pglite", storage: dataDir ? "directory" : "memory" });
+  if (!dataDir && process.env.VERCEL) {
+    // The build refuses this (scripts/migrate.ts) unless it was asked for; say so at run time too.
+    log.error("db.ephemeral_on_serverless", { hint: "Set DATABASE_URL or POSTGRES_URL: this instance's data is lost when it is recycled." });
+  }
   return handle;
 }
 

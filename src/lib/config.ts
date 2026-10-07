@@ -113,6 +113,14 @@ export function getAdminToken(): string | undefined {
   return env("ADMIN_TOKEN");
 }
 
+/**
+ * Shared secret of the scheduled sweep (Vercel Cron sends it as `Authorization: Bearer …`).
+ * Unset means the sweep endpoint is closed.
+ */
+export function getCronSecret(): string | undefined {
+  return env("CRON_SECRET");
+}
+
 /** Absolute base URL of this deployment, used for PayPal return/cancel URLs. */
 export function getAppUrl(requestOrigin?: string): string {
   const explicit = env("APP_URL") ?? env("NEXT_PUBLIC_APP_URL");

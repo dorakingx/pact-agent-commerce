@@ -80,12 +80,25 @@ async function probeDelegatedWallet(provider: ProviderKind, deps: SystemStatusDe
   }
 }
 
+/**
+ * True when the app runs on in-memory PGlite: no database URL and no data directory. Each process
+ * (on serverless, each function instance) then has its own database, gone when it is recycled.
+ * That is how keyless development and the end-to-end tests are meant to run. With PayPal
+ * credentials it is a misconfiguration: authorizations placed at PayPal would have no durable
+ * record, and a deal created on one instance would be unknown to the next.
+ */
+function isEphemeralDatabase(): boolean {
+  return databaseKind() === "pglite" && !process.env.PGLITE_DIR?.trim();
+}
+
 export async function getSystemStatus(deps: SystemStatusDeps = {}): Promise<SystemStatusReport> {
   const payments = probePayments();
   const delegatedWallet = await probeDelegatedWallet(payments.provider, deps);
   const models = getModelConfig();
   const degraded: DegradedComponent[] = [];
-  if (delegatedWallet === null) degraded.push("database");
+  // Real PayPal holds on a database that forgets them: answering, but not a state to run in.
+  const forgetful = payments.provider === "paypal_sandbox" && isEphemeralDatabase();
+  if (delegatedWallet === null || forgetful) degraded.push("database");
   if (!payments.healthy) degraded.push("payments");
 
   return {

@@ -4,7 +4,7 @@
  * builds on (optimistic `version` and the step lease).
  */
 import "server-only";
-import { and, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   CategorySchema,
@@ -202,6 +202,36 @@ export function releaseDealLease(db: Db, id: string, lockId: string): Promise<vo
       .update(deals)
       .set({ lockId: null, lockedUntil: null })
       .where(and(eq(deals.id, id), eq(deals.lockId, lockId)));
+  });
+}
+
+/**
+ * Deals in one of `statuses` that nothing has touched since `updatedBefore` and that no step
+ * holds a lease on, oldest first. For the system driver: a deal whose owner's browser is
+ * stepping it is updated every few seconds and never shows up here.
+ */
+export function listStalledDealIds(
+  db: Db,
+  statuses: readonly DealRow["status"][],
+  updatedBefore: Date,
+  now: Date,
+  limit: number,
+): Promise<string[]> {
+  return dbCall("listStalledDealIds", async () => {
+    if (statuses.length === 0) return [];
+    const rows = await db
+      .select({ id: deals.id })
+      .from(deals)
+      .where(
+        and(
+          inArray(deals.status, [...statuses]),
+          lt(deals.updatedAt, updatedBefore.toISOString()),
+          or(isNull(deals.lockedUntil), lt(deals.lockedUntil, now.toISOString())),
+        ),
+      )
+      .orderBy(asc(deals.updatedAt), asc(deals.id))
+      .limit(Math.max(1, Math.trunc(limit)));
+    return rows.map((row) => row.id);
   });
 }
 

@@ -315,7 +315,9 @@ describe("a capture that does not go through", () => {
     const result = await advanceDeal(declining, session, dealId, APP_URL);
     expect(result).toMatchObject({ executed: "capture", deal: { status: "failed", payment: { status: "voided", capturedMinor: 0 } } });
     expect(result.deal.lastError).toBe("Simulated PayPal refused the capture. Nothing was captured.");
-    expect(result.deal.audit.slice(-2).map((event) => event.type)).toEqual(["payment.failed", "payment.voided"]);
+    // What PayPal said, what PACT did about the hold, and the deal-level line every failure ends with.
+    expect(result.deal.audit.slice(-3).map((event) => event.type)).toEqual(["payment.failed", "payment.voided", "deal.failed"]);
+    expect(result.deal.audit[result.deal.audit.length - 1]).toMatchObject({ data: { issue: "CAPTURE_DECLINED", holdRemains: false } });
     // No money is left on hold, and none of it counts as spent.
     expect((await simulator.getAuthorization(authorizationId)).status).toBe("VOIDED");
     expect(await committedSpendToday(db, session, now())).toBe(0);
@@ -548,6 +550,8 @@ describe("the order and its approval", () => {
     await advanceDeal(offline, session, dealId, APP_URL);
     const last = await advanceDeal(offline, session, dealId, APP_URL);
     expect(last).toMatchObject({ executed: "order", deal: { status: "failed", payment: { status: "none" } } });
+    // Giving up is safe here — an order nobody approved holds nothing — and the trail says the deal was closed.
+    expect(last.deal.audit[last.deal.audit.length - 1]).toMatchObject({ type: "deal.failed", data: { issue: "NETWORK_ERROR", holdRemains: false } });
     expect(await ledger(dealId)).toEqual(["create_order:failed_retryable:4"]);
     expect(await committedSpendToday(db, session, now())).toBe(0);
   });

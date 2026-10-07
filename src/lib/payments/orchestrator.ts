@@ -661,6 +661,12 @@ async function authorizeFromOrder(deps: OrchestratorDeps, args: AuthorizeArgs, n
 /*  1. Open the order                                                          */
 /* -------------------------------------------------------------------------- */
 
+/** The provider's issue for a 2xx answer whose body could not be read (see paypal-http.ts). */
+const UNEXPECTED_RESPONSE = "UNEXPECTED_RESPONSE";
+
+/** Key part of the order that replaces a refused delegated attempt (see `openOrder`). */
+const INTERACTIVE_FALLBACK = "interactive-fallback";
+
 /**
  * Create the PayPal order for EXACTLY the contract price, bound to the terms hash via custom_id.
  *
@@ -676,7 +682,19 @@ async function authorizeFromOrder(deps: OrchestratorDeps, args: AuthorizeArgs, n
  */
 export async function openOrder(
   deps: OrchestratorDeps,
-  input: { dealId: string; signed: SignedContract; returnUrl: string; cancelUrl: string; vaultId?: string },
+  input: {
+    dealId: string;
+    signed: SignedContract;
+    returnUrl: string;
+    cancelUrl: string;
+    vaultId?: string;
+    /**
+     * The order replaces a delegated attempt PayPal refused. That attempt used up the deal's
+     * create-order key (terminally failed in the ledger, and known to PayPal with another body),
+     * so the replacement is sent under a key of its own. Ignored when `vaultId` is given.
+     */
+    interactiveFallback?: boolean;
+  },
 ): Promise<PaymentStepResult> {
   const now = clock(deps);
   const { dealId, signed, vaultId } = input;
@@ -689,7 +707,10 @@ export async function openOrder(
   const violation = contractViolation(dealId, signed);
   if (violation !== null) throw blocked(fresh, "Order creation", violation, now);
 
-  const key = idempotencyKey("create_order", dealId, signed.termsHash);
+  const key =
+    input.interactiveFallback === true && !delegated
+      ? idempotencyKey("create_order", dealId, signed.termsHash, INTERACTIVE_FALLBACK)
+      : idempotencyKey("create_order", dealId, signed.termsHash);
   const contractId = paypalInvoiceId(signed);
   let created: Ledgered<OrderInfo>;
   try {
@@ -945,9 +966,11 @@ async function adoptExistingCapture(
   context: CaptureContext,
   cause: PaymentError,
   now: Date,
+  /** PayPal's view of the authorization when the caller has just read it. */
+  known?: AuthorizationInfo,
 ): Promise<PaymentStepResult> {
   const { payment } = context;
-  const authorization = await readAuthorization(deps, payment, context.authorizationId, now);
+  const authorization = known ?? (await readAuthorization(deps, payment, context.authorizationId, now));
   const adoption = { adoptedFromPayPal: true, paypalAuthorizationStatus: authorization.status, ...errorData(cause) };
   if (authorization.status === "CAPTURED") {
     // PayPal's definition of CAPTURED: the captures cover the full authorized amount.
@@ -967,6 +990,42 @@ async function adoptExistingCapture(
     [],
     now,
   );
+}
+
+/**
+ * The binding of an authorization whose own resource carries no custom_id. PayPal sets custom_id
+ * on the order's purchase unit; whether the authorization resource echoes it is not documented,
+ * so the order is asked — and its answer counts only if it names this very authorization.
+ * Null (the capture is then blocked) when the order does not vouch for it.
+ */
+async function customIdFromOrder(
+  deps: OrchestratorDeps,
+  payment: PaymentRecord,
+  authorizationId: string,
+  now: Date,
+): Promise<string | null> {
+  if (payment.orderId === null) return null;
+  const order = await readOrder(deps, payment, payment.orderId, [], now);
+  return order.authorization?.authorizationId === authorizationId ? order.authorization.customId : null;
+}
+
+/**
+ * After a capture attempt ended in an error that is not a recognised refusal, ask PayPal whether
+ * the authorization was captured all the same (a 2xx answer PACT could not read, a failed
+ * read-back). Null when PayPal shows no capture, or cannot be asked: the caller then treats the
+ * error as what it says.
+ */
+async function capturedDespiteError(
+  deps: OrchestratorDeps,
+  authorizationId: string,
+): Promise<AuthorizationInfo | null> {
+  try {
+    const authorization = await deps.provider.getAuthorization(authorizationId);
+    return authorization.status === "CAPTURED" || authorization.status === "PARTIALLY_CAPTURED" ? authorization : null;
+  } catch (error) {
+    if (!(error instanceof PaymentError)) throw error;
+    return null;
+  }
 }
 
 /**
@@ -1009,14 +1068,15 @@ export async function captureVerified(
   // 2. PayPal's own record of the authorization must still be bound to this contract.
   const authorization = await readAuthorization(deps, payment, authorizationId, now);
   const expectedCustomId = paypalCustomId(signed);
-  if (authorization.customId !== expectedCustomId) {
+  const actualCustomId = authorization.customId ?? (await customIdFromOrder(deps, payment, authorizationId, now));
+  if (actualCustomId !== expectedCustomId) {
     throw blocked(
       payment,
       "Capture",
       {
         issue: "ORDER_CONTRACT_MISMATCH",
         message: "PayPal's authorization is not bound to this contract's terms hash",
-        data: { expectedCustomId, actualCustomId: authorization.customId, reportId },
+        data: { expectedCustomId, actualCustomId, reportId },
       },
       now,
     );
@@ -1088,6 +1148,14 @@ export async function captureVerified(
     if (!(error instanceof PaymentError) || error instanceof PaymentStepError) throw error;
     if (error.issue === "AUTHORIZATION_ALREADY_CAPTURED") return adoptExistingCapture(deps, context, error, now);
     if (error.issue === "AUTHORIZATION_VOIDED" || error.issue === "AUTHORIZATION_EXPIRED") return lapsed(payment, error, now);
+    // PayPal answered the capture with a 2xx PACT could not read: it did act on the request.
+    const answeredUnreadably = error.issue === UNEXPECTED_RESPONSE;
+    if (error.retryable && !answeredUnreadably) throw stepError(payment, error, [], now);
+    // An error is not proof that nothing happened: the capture may have executed and only its
+    // answer been unusable. This also heals later attempts, which get the ledger's stored
+    // terminal error without PayPal being called again. A capture is adopted, never repeated.
+    const capturedAnyway = await capturedDespiteError(deps, authorizationId);
+    if (capturedAnyway !== null) return adoptExistingCapture(deps, context, error, now, capturedAnyway);
     if (error.retryable) throw stepError(payment, error, [], now);
     // PayPal refused, but the authorization may well still be open: the funds stay held and the
     // payment stays "authorized", so the caller can still void it.

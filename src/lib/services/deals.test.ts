@@ -53,7 +53,9 @@ describe("dealStatusForPayment", () => {
   });
 
   it("moves a waiting deal on when PayPal reports the authorization", () => {
-    for (const status of DEAL_STATUSES) expect(forced(status, "authorized")).toBe(status === "awaiting_payment" ? "authorized" : null);
+    // "payment_pending": a delegated order whose answer never arrived is learned from PayPal's webhook.
+    const waiting = new Set(["awaiting_payment", "payment_pending"]);
+    for (const status of DEAL_STATUSES) expect(forced(status, "authorized")).toBe(waiting.has(status) ? "authorized" : null);
   });
 
   it("asks for nothing while the payment has not reached PayPal's books", () => {

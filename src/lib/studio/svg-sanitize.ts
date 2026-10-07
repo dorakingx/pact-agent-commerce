@@ -462,12 +462,21 @@ function compactLower(value: string): string {
   return out.toLowerCase();
 }
 
+/**
+ * CSS functions other than url() that name an image or another element. Presentation attributes
+ * such as `mask` are parsed as CSS, so `mask="image-set('https://…' 1x)"` makes a browser fetch
+ * that address when the file is opened — an external reference without the letters "url(".
+ * (`-webkit-image-set(` contains `image-set(`.) No drawing needs any of them.
+ */
+const RESOURCE_FUNCTIONS = ["image-set(", "image(", "cross-fade(", "element(", "paint("] as const;
+
 function isSafeAttributeValue(name: string, value: string): boolean {
   // CSS escapes ("u\72l(") could spell url() or a scheme past the checks below; no drawing needs them.
   if (value.includes("\\")) return false;
   const compact = compactLower(value);
   if (FORBIDDEN_SCHEMES.some((scheme) => compact.includes(scheme))) return false;
   if (name === "href") return FRAGMENT_PATTERN.test(value.trim());
+  if (RESOURCE_FUNCTIONS.some((fn) => compact.includes(fn))) return false;
   // Every url(...) must point inside this document; anything else could fetch a remote resource.
   return !compact.replace(INTERNAL_URL_PATTERN, "").includes("url(");
 }

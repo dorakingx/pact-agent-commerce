@@ -1,6 +1,6 @@
 /** Fixed-window request counters for abuse protection on the public demo. */
 import "server-only";
-import { sql } from "drizzle-orm";
+import { lt, sql } from "drizzle-orm";
 import type { Db } from "../client";
 import { dbCall } from "../errors";
 import { rateLimits } from "../schema";
@@ -59,5 +59,17 @@ export function hitRateLimit(
       remaining: Math.max(0, limit - row.count),
       resetAt: new Date(windowStartMs + windowMs).toISOString(),
     };
+  });
+}
+
+/**
+ * Remove counters whose window started before `before`. A counter is only meaningful for the
+ * length of its window, so anything older than the longest window is dead weight; without this
+ * the table would keep one row per subject for ever. Returns how many rows were removed.
+ */
+export function deleteStaleRateLimits(db: Db, before: Date): Promise<number> {
+  return dbCall("deleteStaleRateLimits", async () => {
+    const removed = await db.delete(rateLimits).where(lt(rateLimits.windowStart, before.toISOString())).returning({ key: rateLimits.key });
+    return removed.length;
   });
 }

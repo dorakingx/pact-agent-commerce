@@ -42,7 +42,7 @@ import { appendAudit } from "./audit-log";
 import type { ServiceContext } from "./context";
 import { isDealId } from "./deals";
 import { notFound } from "./errors";
-import { enforceRateLimit, rateLimitKey } from "./rate-limit";
+import { GLOBAL_SUBJECT, RATE_LIMITS, UNKNOWN_CLIENT, enforceRateLimit, enforceRule, rateLimitKey, withinRule } from "./rate-limit";
 import { SYSTEM_OWNER } from "./session";
 
 /** Each reconciliation costs PayPal reads and possibly a model call. */
@@ -275,9 +275,13 @@ async function narrate(
   request: Omit<AuditorInput, "credentials">,
   provider: ProviderKind,
   options: ReconcileOptions,
+  /** Counts one statement against the deployment's budget; false once it is spent. */
+  withinBudget: () => Promise<boolean>,
 ): Promise<Narration> {
   const access = agentAccess(provider, options);
   if ("unavailable" in access) return withoutStatement(access.unavailable);
+  // Asked only when the agent would really run, so reconciliations that never reach a model cost nothing.
+  if (!(await withinBudget())) return withoutStatement("The auditor agent has written its share of statements for this hour.");
   const run = options.deps?.narrate ?? ((input: AuditorInput) => writeReconciliationStatement(input));
   try {
     const statement = await run({ ...request, credentials: access.credentials });
@@ -373,7 +377,7 @@ async function readPayPal(ctx: ServiceContext, orderId: string, authorizationId:
   return { order, authorization };
 }
 
-/** Per session; callers without one share a budget per network address (or one anonymous budget). */
+/** Per session; callers without one share a budget per network address (or one anonymous budget). Sessions are counted per address too. */
 function rateLimitSubject(viewerSessionId: string | null, clientKey: string | null): string {
   return viewerSessionId ?? `client:${clientKey ?? "anonymous"}`;
 }
@@ -400,10 +404,13 @@ export async function reconcileWithPayPal(
   options: ReconcileOptions = {},
 ): Promise<ReconciliationView> {
   if (!isDealId(dealId)) throw notFound("Deal");
-  if (viewerSessionId !== SYSTEM_OWNER) {
+  const throttled = viewerSessionId !== SYSTEM_OWNER;
+  if (throttled) {
     const { scope, limit, windowSeconds } = RECONCILE_RATE_LIMIT;
     const subject = rateLimitSubject(viewerSessionId, options.clientKey ?? null);
     await enforceRateLimit(ctx, rateLimitKey(scope, subject), limit, windowSeconds);
+    // A session is free to mint, so its budget alone bounds nothing: the address is counted as well.
+    if (viewerSessionId !== null) await enforceRule(ctx, RATE_LIMITS.reconcilePerClient, options.clientKey ?? UNKNOWN_CLIENT);
   }
   const now = ctx.now();
   const graph = (await loadDealGraphs(ctx.db, [dealId], { artifacts: false })).get(dealId);
@@ -433,7 +440,10 @@ export async function reconcileWithPayPal(
   }
 
   const facts = buildReconciliationFacts({ signed, payment, ...records, now });
-  const narration = await narrate({ orderId: payment.orderId, facts, logFields: { dealId } }, payment.provider, options);
+  // The statement is shown to whoever asked, owner or not (showcase deals have no browser owner),
+  // so what bounds its cost is one budget for the whole deployment rather than who is asking.
+  const withinBudget = async (): Promise<boolean> => !throttled || withinRule(ctx, RATE_LIMITS.narratedReconcileGlobal, GLOBAL_SUBJECT);
+  const narration = await narrate({ orderId: payment.orderId, facts, logFields: { dealId } }, payment.provider, options, withinBudget);
 
   const isOwner = viewerSessionId !== null && viewerSessionId === graph.deal.owner;
   const unrecorded =

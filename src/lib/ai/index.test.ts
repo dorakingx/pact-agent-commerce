@@ -107,7 +107,7 @@ const MODEL_MOVE = {
 };
 const MODEL_INTENT = {
   category: "illustration",
-  summary: "Three landing-page illustrations.",
+  restrictedContent: false,
   workType: "illustration",
   count: 3,
   countIsStrict: true,
@@ -205,7 +205,8 @@ describe("createAgents: ai mode", () => {
     const ai = { source: "ai", model: TEST_MODEL, latencyMs: 12, degradedReason: null };
 
     const intent = await agents.parseIntent(INTENT, TEST_NOW, -540);
-    expect(intent.mandate.summary).toBe("Three landing-page illustrations.");
+    // The summary is composed from the binding values, never the model's own wording.
+    expect(intent.mandate.summary).toBe("3 × landing-page illustrations in 16:9 and 1:1, up to $50.00, 1 revision, due Wed, Oct 7 at 6:00 PM (UTC+9)");
     expect(intent.meta).toEqual(ai);
 
     const buyer = await agents.buyerMove(buyerCtx);

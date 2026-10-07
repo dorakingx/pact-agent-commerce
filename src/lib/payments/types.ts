@@ -144,7 +144,18 @@ export interface PaymentProvider {
   exchangeVaultSetup(setupTokenId: string, idempotencyKey: string): Promise<VaultTokenInfo>;
 
   /** Verify an incoming webhook. `rawBody` MUST be the exact bytes received. */
-  verifyWebhook(headers: Headers, rawBody: string): Promise<WebhookVerification>;
+  verifyWebhook(headers: Headers, rawBody: string, options?: WebhookVerifyOptions): Promise<WebhookVerification>;
+}
+
+export interface WebhookVerifyOptions {
+  /**
+   * Asked before every outbound call that verifying this delivery would cause (fetching a signing
+   * certificate, asking the provider to verify). Resolve false to forbid the call: the delivery is
+   * then reported as not verified. The webhook endpoint is open to anyone, so without this a
+   * stream of forged deliveries would turn into a stream of calls under PACT's own credentials.
+   * Omitted: calls are allowed.
+   */
+  mayCallOut?: () => Promise<boolean>;
 }
 
 /**

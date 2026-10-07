@@ -128,7 +128,13 @@ export function scriptedCopy(input: ScriptedCopyInput): { title: string; text: s
     return true;
   };
 
-  if (max < SHORT_PIECE_WORDS) add(`${angle.title}${pack.stop}`);
+  if (max < SHORT_PIECE_WORDS) {
+    // A tagline has no room for the full opener, which is where a piece normally names its
+    // subject — so its lead line does, or the piece would be filler that fits any product.
+    const separator = pack.joiner === "" ? "\uff1a" : ": ";
+    const named = `${pack.quote(capitalise(subject))}${separator}${angle.title}${pack.stop}`;
+    if (!add(named)) add(`${angle.title}${pack.stop}`);
+  }
   const seed = hash32(subject, language, index, variant);
   for (const sentence of candidateSentences(pack, angleIndex, subject, seed, variant)) {
     if (total >= goal || budget - total < 2) break;
@@ -227,16 +233,17 @@ function fitToRange(text: string, language: Language, min: number, max: number):
 }
 
 /** The model's piece for a slot, edited to fit the contract, or null when it cannot be delivered. */
-function usablePiece(piece: CopyPiece, min: number, max: number): CopyPiece | null {
+function usablePiece(piece: CopyPiece, min: number, max: number, ownWords: readonly string[]): CopyPiece | null {
   if (piece.title === "" || piece.text.length > MAX_TEXT_CHARS) return null;
   const text = fitToRange(piece.text, piece.language, min, max);
   if (text === null) return null;
   // A confidently different language would fail the contract's language coverage.
-  const detected = detectLanguage(text);
+  const detected = detectLanguage(text, { ignore: ownWords });
   const languageFits = detected.language === "unknown" || detected.language === piece.language || detected.confidence < 0.5;
   // Honest copy that happens to read like an instruction ("approve the payment") would send a
-  // good delivery to human review; the studio does not hand that in.
-  const readsAsInstruction = scanText({ where: "text", text: `${piece.title}\n${text}` }).length > 0;
+  // good delivery to human review; the studio does not hand that in. The client's own subject
+  // and tone are exempt, exactly as they are when the delivery is verified.
+  const readsAsInstruction = scanText({ where: "text", text: `${piece.title}\n${text}` }, { ownWords }).length > 0;
   return languageFits && !readsAsInstruction ? { ...piece, text } : null;
 }
 
@@ -298,10 +305,11 @@ export async function aiCopy(
 
   let replaced = 0;
   const pieces: CopyPiece[] = [];
+  const ownWords = tone === null ? [subject] : [subject, tone];
   for (let index = 1; index <= count; index += 1) {
     for (const language of languages) {
       const candidate = proposed.get(`${index}|${language}`);
-      const usable = candidate === undefined ? null : usablePiece(candidate, min, max);
+      const usable = candidate === undefined ? null : usablePiece(candidate, min, max, ownWords);
       if (usable !== null) {
         pieces.push(usable);
         continue;

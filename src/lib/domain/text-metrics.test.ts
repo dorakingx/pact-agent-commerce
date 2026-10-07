@@ -79,6 +79,24 @@ describe("detectLanguage", () => {
     expect(detectLanguage(englishText(100)).language).toBe("en");
   });
 
+  it("is not thrown by a long quoted subject in another language when told what the text quotes", () => {
+    const subject = "The Complete Guide to Cold Brew Coffee Subscriptions for Small Offices and Remote Teams";
+    const tagline = `「${subject}」：毎朝を、もっと豊かに。丁寧に選んだ豆をお届けします。`;
+    // Mostly Latin letters by count, so the bare reading is confidently wrong…
+    expect(detectLanguage(tagline)).toMatchObject({ language: "en" });
+    // …but what is left once the quoted subject is set aside is Japanese.
+    expect(detectLanguage(tagline, { ignore: [subject] })).toMatchObject({ language: "ja" });
+    expect(detectLanguage(tagline, { ignore: [subject] }).confidence).toBeGreaterThanOrEqual(0.9);
+    // A subject cut short where it is quoted is still recognised by its beginning.
+    const clipped = `「${subject.slice(0, 48)}…」：毎朝を、もっと豊かに。丁寧に選んだ豆をお届けします。`;
+    expect(detectLanguage(clipped, { ignore: [subject] })).toMatchObject({ language: "ja" });
+  });
+
+  it("does not let the ignore list turn English into something else", () => {
+    const text = "The new espresso machine is ready for your kitchen, and it is quiet.";
+    expect(detectLanguage(text, { ignore: ["espresso machine", "a subject that never appears in it"] })).toMatchObject({ language: "en" });
+  });
+
   it("answers unknown, with zero confidence, when there is nothing to go on", () => {
     for (const text of ["", "   ", "12345 67890", "!!! ???", "Espresso Pro", "X200"]) {
       expect(detectLanguage(text), JSON.stringify(text)).toEqual({ language: "unknown", confidence: 0 });

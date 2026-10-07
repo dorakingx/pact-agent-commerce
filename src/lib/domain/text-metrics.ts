@@ -125,12 +125,56 @@ function detectLatinLanguage(text: string): { language: Language | "unknown"; co
   return { language: best.language, confidence: round2(margin * coverage) };
 }
 
+/** A quoted phrase shorter than this says too little about the text around it to be worth removing. */
+const MIN_IGNORED_PHRASE_CHARS = 12;
+
+/**
+ * Remove verbatim, case-insensitive occurrences of `phrases` — or, for a phrase that was cut
+ * short where it is quoted, of its longest leading part that occurs.
+ */
+function withoutPhrases(text: string, phrases: readonly string[]): string {
+  let remaining = text;
+  for (const phrase of phrases) {
+    const wanted = phrase.replace(/\s+/g, " ").trim().replace(/[.\u3002\u2026]+$/, "").toLowerCase();
+    for (let length = wanted.length; length >= MIN_IGNORED_PHRASE_CHARS; length -= 1) {
+      const part = wanted.slice(0, length).trimEnd();
+      if (part.length < MIN_IGNORED_PHRASE_CHARS) break;
+      if (!remaining.toLowerCase().includes(part)) continue;
+      remaining = removeAll(remaining, part);
+      break;
+    }
+  }
+  return remaining;
+}
+
+/** Every occurrence of `lowerPart` (already lower-cased) replaced by a space, whatever its case in `text`. */
+function removeAll(text: string, lowerPart: string): string {
+  const lowered = text.toLowerCase();
+  // Lower-casing changes the length of a few exotic characters; indices must fit the string they cut.
+  const source = lowered.length === text.length ? text : lowered;
+  let out = "";
+  let from = 0;
+  for (let at = lowered.indexOf(lowerPart); at !== -1; at = lowered.indexOf(lowerPart, from)) {
+    out += `${source.slice(from, at)} `;
+    from = at + lowerPart.length;
+  }
+  return out + source.slice(from);
+}
+
 /**
  * Best-effort language of `text` among the languages PACT contracts can name.
  * Heuristic by design: script share decides Japanese, stop-word frequency decides between the
  * Latin-script languages. Callers must treat a low confidence as "unknown".
+ *
+ * `ignore` names phrases the text is expected to QUOTE in another language — the contract's own
+ * subject, typically. A Japanese tagline that names a long English product would otherwise be
+ * measured as mostly Latin letters and called English with full confidence.
  */
-export function detectLanguage(text: string): { language: Language | "unknown"; confidence: number } {
+export function detectLanguage(
+  input: string,
+  options: { ignore?: readonly string[] } = {},
+): { language: Language | "unknown"; confidence: number } {
+  const text = options.ignore === undefined || options.ignore.length === 0 ? input : withoutPhrases(input, options.ignore);
   const kana = occurrences(text, KANA);
   const han = occurrences(text, HAN);
   const latin = occurrences(text, LATIN_LETTER);

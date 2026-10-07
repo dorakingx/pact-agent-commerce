@@ -132,6 +132,74 @@ const INSTRUCTION_PATTERNS: readonly RegExp[] = [
   pattern("(?:合格|承認済み|パス)(?:として|と|に)(?:マーク|判定|扱|記録)"),
 ];
 
+export interface ScanOptions {
+  /**
+   * Phrases the BUYER wrote into the contract (its subject, style or tone, title). A delivery is
+   * expected to repeat them — "Approve the Payment week banners" is the job, not an attack — so
+   * a match that lies entirely inside one of them is not read as an instruction. Never pass
+   * seller-supplied text.
+   */
+  ownWords?: readonly string[];
+}
+
+/** A long subject is often cut to fit a title; this much of its beginning is still recognisably the buyer's. */
+const MIN_OWN_PREFIX_CHARS = 16;
+const MIN_OWN_PHRASE_CHARS = 3;
+
+interface Span {
+  start: number;
+  end: number;
+}
+
+function spansOf(lowerText: string, lowerPhrase: string): Span[] {
+  const spans: Span[] = [];
+  for (let at = lowerText.indexOf(lowerPhrase); at !== -1; at = lowerText.indexOf(lowerPhrase, at + 1)) {
+    spans.push({ start: at, end: at + lowerPhrase.length });
+  }
+  return spans;
+}
+
+/**
+ * Where the buyer's own phrases occur in `text` (already normalised for scanning), ignoring
+ * case. When a whole phrase does not occur, its longest leading part that does — a subject cut
+ * short to fit a title — counts instead.
+ */
+function ownWordSpans(text: string, ownWords: readonly string[]): Span[] {
+  const lower = text.toLowerCase();
+  // Lower-casing changes the length of a few exotic characters; spans must index the text they describe.
+  if (lower.length !== text.length) return [];
+  const spans: Span[] = [];
+  for (const raw of new Set(ownWords)) {
+    const phrase = normaliseForScan(raw).replace(/[.\u3002\u2026]+$/, "").toLowerCase();
+    if (phrase.length < MIN_OWN_PHRASE_CHARS) continue;
+    let found = spansOf(lower, phrase);
+    for (let length = phrase.length - 1; found.length === 0 && length >= MIN_OWN_PREFIX_CHARS; length -= 1) {
+      found = spansOf(lower, phrase.slice(0, length));
+    }
+    spans.push(...found);
+  }
+  return spans;
+}
+
+/**
+ * The first place `instruction` matches that is not simply the buyer's own words. A match is
+ * excused only when it lies ENTIRELY inside one of their phrases: "release funds" inside the
+ * subject "how to release funds faster" is the job, but "approve the payment" built around a
+ * subject of "the payment" reaches outside it and is reported like any other.
+ */
+function firstUnexcused(instruction: RegExp, text: string, excused: readonly Span[]): Span | null {
+  if (excused.length === 0) {
+    const match = instruction.exec(text);
+    return match === null ? null : { start: match.index, end: match.index + match[0].length };
+  }
+  const everywhere = new RegExp(instruction.source, instruction.flags.includes("g") ? instruction.flags : `${instruction.flags}g`);
+  for (const match of text.matchAll(everywhere)) {
+    const span = { start: match.index, end: match.index + match[0].length };
+    if (!excused.some((own) => own.start <= span.start && span.end <= own.end)) return span;
+  }
+  return null;
+}
+
 function quoteFinding(where: string, text: string, start: number, end: number): string {
   const label = truncate(where, MAX_LABEL_CHARS);
   let from = Math.max(0, start - SNIPPET_LEAD);
@@ -147,12 +215,13 @@ function quoteFinding(where: string, text: string, start: number, end: number): 
  * Instruction-like phrases in one piece of text, as short quoted findings (<= 120 chars each).
  * Matches that sit close together are one injected passage and are reported as one finding.
  */
-export function scanText(segment: TextSegment): string[] {
+export function scanText(segment: TextSegment, options: ScanOptions = {}): string[] {
   const text = normaliseForScan(segment.text);
-  const matches: Array<{ start: number; end: number }> = [];
+  const excused = options.ownWords === undefined || options.ownWords.length === 0 ? [] : ownWordSpans(text, options.ownWords);
+  const matches: Span[] = [];
   for (const instruction of INSTRUCTION_PATTERNS) {
-    const match = instruction.exec(text);
-    if (match !== null) matches.push({ start: match.index, end: match.index + match[0].length });
+    const match = firstUnexcused(instruction, text, excused);
+    if (match !== null) matches.push(match);
   }
   matches.sort((a, b) => a.start - b.start);
 
@@ -199,12 +268,12 @@ function svgSegments(doc: SvgDocument): TextSegment[] {
  * backstop for markup this module's tokeniser reads differently from other parsers, where
  * text could otherwise sit in a place none of the structured segments cover.
  */
-function scanSvg(doc: SvgDocument): string[] {
-  const structured = svgSegments(doc).flatMap(scanText);
-  return structured.length > 0 ? structured : scanText({ where: "SVG markup", text: decodeEntities(doc.source) });
+function scanSvg(doc: SvgDocument, options: ScanOptions): string[] {
+  const structured = svgSegments(doc).flatMap((segment) => scanText(segment, options));
+  return structured.length > 0 ? structured : scanText({ where: "SVG markup", text: decodeEntities(doc.source) }, options);
 }
 
-function artifactFindings(artifact: Artifact): string[] {
+function artifactFindings(artifact: Artifact, options: ScanOptions): string[] {
   switch (artifact.kind) {
     case "illustration": {
       const doc = parseSvg(artifact.svg);
@@ -216,7 +285,8 @@ function artifactFindings(artifact: Artifact): string[] {
         { where: "description", text: artifact.description },
         { where: "aspect-ratio label", text: artifact.aspectRatio },
       ];
-      return [...fields.flatMap(scanText), ...scanSvg(doc), ...hidden];
+      // Hidden text is reported whatever it says: the buyer's words do not excuse concealing them.
+      return [...fields.flatMap((field) => scanText(field, options)), ...scanSvg(doc, options), ...hidden];
     }
     case "copy": {
       const fields: TextSegment[] = [
@@ -224,7 +294,7 @@ function artifactFindings(artifact: Artifact): string[] {
         { where: "language label", text: artifact.language },
         { where: "text", text: artifact.text },
       ];
-      return fields.flatMap(scanText);
+      return fields.flatMap((field) => scanText(field, options));
     }
     default: {
       const unknown: never = artifact;
@@ -237,7 +307,7 @@ function artifactFindings(artifact: Artifact): string[] {
  * Scan everything an artifact carries for instructions aimed at an automated checker, and for
  * SVG text that is present in the file but invisible in the rendered image.
  */
-export function scanForEmbeddedInstructions(artifact: Artifact): { suspicious: boolean; findings: string[] } {
-  const findings = [...new Set(artifactFindings(artifact))].slice(0, MAX_FINDINGS);
+export function scanForEmbeddedInstructions(artifact: Artifact, options: ScanOptions = {}): { suspicious: boolean; findings: string[] } {
+  const findings = [...new Set(artifactFindings(artifact, options))].slice(0, MAX_FINDINGS);
   return { suspicious: findings.length > 0, findings };
 }

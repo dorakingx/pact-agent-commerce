@@ -31,6 +31,10 @@ export type WebhookEffect = {
   amountMinor: number | null;
   customId: string | null;
   invoiceId: string | null;
+  /** The resource's own status as PayPal reports it (e.g. an authorization that is still PENDING), or null. */
+  resourceStatus: string | null;
+  /** When the resource stops being usable (an authorization's expiration_time), as an ISO instant, or null. */
+  expiresAt: string | null;
 };
 
 type EffectKind = WebhookEffect["kind"];
@@ -59,6 +63,8 @@ const MoneySchema = z.object({ currency_code: z.string().nullish(), value: z.str
 
 const ResourceSchema = z.object({
   id: z.string().nullish(),
+  status: z.string().nullish(),
+  expiration_time: z.string().nullish(),
   amount: MoneySchema.nullish(),
   custom_id: z.string().nullish(),
   invoice_id: z.string().nullish(),
@@ -83,8 +89,30 @@ type Resource = z.infer<typeof ResourceSchema>;
 const EnvelopeSchema = z.object({
   id: z.string().nullish(),
   event_type: z.string().nullish(),
+  resource_type: z.string().nullish(),
+  create_time: z.string().nullish(),
   resource: z.unknown(),
 });
+
+/**
+ * What is kept of a verified delivery: the envelope's identifying fields and exactly the parts
+ * of the resource that interpretation reads. Everything else PayPal sends is dropped before
+ * storage — an order resource carries the payer's name, e-mail address and payer id, and PACT
+ * has no use for them. A redelivery is processed from its own body, never from this row.
+ */
+export function storedWebhookPayload(event: unknown): Record<string, unknown> {
+  const envelope = EnvelopeSchema.safeParse(event);
+  if (!envelope.success) return {};
+  const resource = ResourceSchema.safeParse(envelope.data.resource);
+  const { id, event_type, resource_type, create_time } = envelope.data;
+  return { id, event_type, resource_type, create_time, resource: resource.success ? resource.data : null };
+}
+
+function isoOrNull(timestamp: string | null | undefined): string | null {
+  if (!timestamp) return null;
+  const ms = Date.parse(timestamp);
+  return Number.isNaN(ms) ? null : new Date(ms).toISOString();
+}
 
 function minorOf(amount: z.infer<typeof MoneySchema> | null | undefined): number | null {
   if (!amount || amount.currency_code !== CURRENCY || typeof amount.value !== "string") return null;
@@ -124,6 +152,8 @@ export function interpretWebhookEvent(event: unknown): WebhookEffect {
     amountMinor: null,
     customId: null,
     invoiceId: null,
+    resourceStatus: resource?.status ?? null,
+    expiresAt: isoOrNull(resource?.expiration_time),
   };
   const kind = EVENT_KINDS.get(eventType);
   if (kind === undefined || !resource?.id) return ignored;
@@ -336,33 +366,19 @@ function applyApproved(payment: PaymentRecord, effect: WebhookEffect, now: Date)
   );
 }
 
-function applyAuthorized(payment: PaymentRecord, effect: WebhookEffect, now: Date): WebhookApplication {
+/** PayPal's word for an authorization that holds funds. Absent on older payloads, which only ever described held funds. */
+const HELD_AUTHORIZATION_STATUS = "CREATED";
+
+function applyAuthorized(payment: PaymentRecord, effect: WebhookEffect, bound: boolean, now: Date): WebhookApplication {
   switch (payment.status) {
     case "none":
-      return mismatch(payment, effect, "PACT has no order on record for this payment", now);
+      // A reservation with no order id yet: only an event that carries this contract's own
+      // binding can be the answer to the create-order call PACT never heard back from.
+      if (!bound || effect.orderId === null) return mismatch(payment, effect, "PACT has no order on record for this payment", now);
+      return adoptAuthorization(payment, effect, { orderId: effect.orderId }, now);
     case "created":
-    case "approved": {
-      const { authorizationId, amountMinor } = effect;
-      if (authorizationId === null) return mismatch(payment, effect, "it carries no authorization id", now);
-      if (amountMinor === null || amountMinor !== payment.amountMinor) {
-        return mismatch(payment, effect, "the authorized amount differs from the contract price on record", now);
-      }
-      return advance(
-        payment,
-        effect,
-        {
-          to: "authorized",
-          flag: "authorized",
-          patch: { authorizationId, authorizedMinor: amountMinor, approveUrl: null, lastError: null },
-          notice: "PayPal webhook: an authorization was created for the order",
-          stateEvent: {
-            type: "payment.authorized",
-            title: `PayPal authorized ${formatMoney(amountMinor)} — the funds are held, not captured`,
-          },
-        },
-        now,
-      );
-    }
+    case "approved":
+      return adoptAuthorization(payment, effect, {}, now);
     case "authorized":
     case "captured":
     case "voided":
@@ -375,6 +391,53 @@ function applyAuthorized(payment: PaymentRecord, effect: WebhookEffect, now: Dat
     default:
       return assertNever(payment.status);
   }
+}
+
+/**
+ * PayPal reports an authorization the record does not have yet. Funds are only held by one that
+ * is CREATED: a PENDING one is still under review (the orchestrator treats the same answer as
+ * "no funds are held yet"), and a denied or voided one never will be.
+ */
+function adoptAuthorization(payment: PaymentRecord, effect: WebhookEffect, extra: RecordPatch, now: Date): WebhookApplication {
+  const { authorizationId, amountMinor } = effect;
+  if (authorizationId === null) return mismatch(payment, effect, "it carries no authorization id", now);
+  if (amountMinor === null || amountMinor !== payment.amountMinor) {
+    return mismatch(payment, effect, "the authorized amount differs from the contract price on record", now);
+  }
+  const status = effect.resourceStatus ?? HELD_AUTHORIZATION_STATUS;
+  if (status === "PENDING") {
+    return unchanged(payment, [
+      auditEvent(now, "payment.webhook", "PayPal webhook: an authorization was created but is still under review — no funds are held yet", payment, effect, {
+        resourceStatus: status,
+      }),
+    ]);
+  }
+  if (status !== HELD_AUTHORIZATION_STATUS) {
+    return mismatch(payment, effect, `PayPal reports the authorization as ${status.toLowerCase()}, which holds no funds`, now);
+  }
+  return advance(
+    payment,
+    effect,
+    {
+      to: "authorized",
+      flag: "authorized",
+      patch: {
+        ...extra,
+        authorizationId,
+        authorizedMinor: amountMinor,
+        // Without it the record could not say when the hold lapses, and reconciliation would report a difference.
+        authorizationExpiresAt: effect.expiresAt ?? payment.authorizationExpiresAt,
+        approveUrl: null,
+        lastError: null,
+      },
+      notice: "PayPal webhook: an authorization was created for the order",
+      stateEvent: {
+        type: "payment.authorized",
+        title: `PayPal authorized ${formatMoney(amountMinor)} — the funds are held, not captured`,
+      },
+    },
+    now,
+  );
 }
 
 function applyCaptured(payment: PaymentRecord, effect: WebhookEffect, now: Date): WebhookApplication {
@@ -518,16 +581,29 @@ function applyRefunded(payment: PaymentRecord, effect: WebhookEffect, now: Date)
  * Fold a verified webhook effect into a payment record. Pure: returns a new record (or the same
  * one when nothing changed), the audit events to append, and whether the record must be saved.
  */
-export function applyWebhookEffect(payment: PaymentRecord, effect: WebhookEffect, now: Date): WebhookApplication {
+export function applyWebhookEffect(
+  payment: PaymentRecord,
+  effect: WebhookEffect,
+  now: Date,
+  options: {
+    /**
+     * The caller has checked that the event carries this deal's contract binding (custom_id with
+     * the terms hash, invoice_id with the contract id). It lets an event reach a payment that
+     * holds no PayPal id to match on yet; it never overrides ids that disagree.
+     */
+    boundToContract?: boolean;
+  } = {},
+): WebhookApplication {
   if (effect.kind === "ignored") return unchanged(payment);
+  const bound = options.boundToContract === true;
   const relation = relate(payment, effect);
   if (relation === "conflict") return mismatch(payment, effect, "it names different PayPal ids than this payment", now);
-  if (relation === "unrelated") return mismatch(payment, effect, "it does not reference this payment's PayPal ids", now);
+  if (relation === "unrelated" && !bound) return mismatch(payment, effect, "it does not reference this payment's PayPal ids", now);
   switch (effect.kind) {
     case "approved":
       return applyApproved(payment, effect, now);
     case "authorized":
-      return applyAuthorized(payment, effect, now);
+      return applyAuthorized(payment, effect, bound, now);
     case "captured":
       return applyCaptured(payment, effect, now);
     case "capture_pending":

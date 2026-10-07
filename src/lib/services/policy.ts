@@ -7,7 +7,7 @@
  * "check the daily limit, then commit the spend" one indivisible action.
  */
 import "server-only";
-import { and, eq, inArray, ne, or, sql } from "drizzle-orm";
+import { and, eq, inArray, ne, or, sql, type SQL } from "drizzle-orm";
 import type { PolicyResponse } from "../api/dto";
 import { getPolicyDoc, upsertPolicyDoc, type Db } from "../db";
 import { dbCall } from "../db/errors";
@@ -18,7 +18,7 @@ import { DEFAULT_POLICY, PolicySchema, type AuditEventType, type Policy } from "
 import type { DealStatus, PaymentStatus } from "../domain/status";
 import type { ServiceContext } from "./context";
 import { invalid } from "./errors";
-import { RATE_LIMITS, enforceRule } from "./rate-limit";
+import { RATE_LIMITS, UNKNOWN_CLIENT, enforceRule } from "./rate-limit";
 
 /** The policy in force for an owner: the document they saved, or the default. */
 export async function effectivePolicy(db: Db, owner: string): Promise<Policy> {
@@ -61,28 +61,63 @@ export function committedSpendToday(
   now: Date,
   options: { excludeDealId?: string } = {},
 ): Promise<number> {
-  return dbCall("committedSpendToday", async () => {
-    const authorizedAt = sql`coalesce((
-      select min(${auditEvents.at}) from ${auditEvents}
-      where ${auditEvents.dealId} = ${payments.dealId} and ${auditEvents.type} = ${AUTHORIZED_EVENT}
-    ), ${payments.updatedAt})`;
-    const isHeld = inArray(payments.status, HELD_PAYMENT_STATUSES);
-    const heldToday = and(isHeld, sql`${authorizedAt} >= ${startOfUtcDay(now)}::timestamptz`);
-    const openOrder = and(inArray(payments.status, OPEN_PAYMENT_STATUSES), inArray(deals.status, OPEN_DEAL_STATUSES));
-    const amount = sql`case when ${isHeld} then ${payments.authorizedMinor} else ${payments.amountMinor} end`;
-    const [row] = await db
-      .select({ total: sql<number>`coalesce(sum(${amount}), 0)`.mapWith(Number) })
-      .from(payments)
-      .innerJoin(deals, eq(deals.id, payments.dealId))
-      .where(
-        and(
-          eq(deals.owner, owner),
-          or(heldToday, openOrder),
-          options.excludeDealId === undefined ? undefined : ne(payments.dealId, options.excludeDealId),
-        ),
-      );
-    return row.total;
-  });
+  return dbCall("committedSpendToday", () => committedToday(db, eq(deals.owner, owner), now, options));
+}
+
+/**
+ * What is committed today against one delegated wallet, whoever's deals it paid for: the same
+ * counting rules as {@link committedSpendToday}, summed over the payments reserved against the
+ * wallet instead of over one owner's deals. This is the figure a shared wallet's own cap is
+ * checked against — a visitor's per-session total says nothing about it.
+ */
+export function walletCommittedToday(
+  db: Db,
+  walletOwner: string,
+  now: Date,
+  options: { excludeDealId?: string } = {},
+): Promise<number> {
+  return dbCall("walletCommittedToday", () => committedToday(db, eq(payments.walletOwner, walletOwner), now, options));
+}
+
+async function committedToday(db: Db, scope: SQL, now: Date, options: { excludeDealId?: string }): Promise<number> {
+  const authorizedAt = sql`coalesce((
+    select min(${auditEvents.at}) from ${auditEvents}
+    where ${auditEvents.dealId} = ${payments.dealId} and ${auditEvents.type} = ${AUTHORIZED_EVENT}
+  ), ${payments.updatedAt})`;
+  const isHeld = inArray(payments.status, HELD_PAYMENT_STATUSES);
+  const heldToday = and(isHeld, sql`${authorizedAt} >= ${startOfUtcDay(now)}::timestamptz`);
+  const openOrder = and(inArray(payments.status, OPEN_PAYMENT_STATUSES), inArray(deals.status, OPEN_DEAL_STATUSES));
+  const amount = sql`case when ${isHeld} then ${payments.authorizedMinor} else ${payments.amountMinor} end`;
+  const [row] = await db
+    .select({ total: sql<number>`coalesce(sum(${amount}), 0)`.mapWith(Number) })
+    .from(payments)
+    .innerJoin(deals, eq(deals.id, payments.dealId))
+    .where(and(scope, or(heldToday, openOrder), options.excludeDealId === undefined ? undefined : ne(payments.dealId, options.excludeDealId)));
+  return row.total;
+}
+
+/* -------------------------------------------------------------------------- */
+/*  The shared demo wallet                                                     */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * The operator's cap on the shared demo wallet. A visitor's policy is a document the visitor
+ * writes, and a new cookie starts a new daily total, so neither can be what protects an account
+ * every visitor pays from. These two figures are fixed in code and counted per wallet.
+ *
+ * The per-order cap leaves room for the scripted "human approval" scenario ($180), which the
+ * demo runs on this wallet. An order over either figure is not refused: it falls back to the
+ * visitor's own approval in PayPal.
+ */
+export const DEMO_WALLET_LIMITS = { perOrderMinor: 25_000, dailyMinor: 250_000 } as const;
+
+export type DemoWalletRefusal = "demo_wallet_order_limit" | "demo_wallet_daily_limit";
+
+/** Why the shared wallet may not pay an order of `amountMinor`, or null when it may. */
+export function demoWalletRefusal(amountMinor: number, committedMinor: number): DemoWalletRefusal | null {
+  if (amountMinor > DEMO_WALLET_LIMITS.perOrderMinor) return "demo_wallet_order_limit";
+  if (committedMinor + amountMinor > DEMO_WALLET_LIMITS.dailyMinor) return "demo_wallet_daily_limit";
+  return null;
 }
 
 /** 52 bits of the digest: the widest key that is still an exact JavaScript integer. */
@@ -137,9 +172,18 @@ function parsePolicy(input: unknown): Policy {
  *
  * @throws ZodError / ApiError (400) for an invalid document, ApiError (429) when updated too often.
  */
-export async function updatePolicy(ctx: ServiceContext, sessionId: string, input: unknown): Promise<PolicyResponse> {
+export async function updatePolicy(
+  ctx: ServiceContext,
+  sessionId: string,
+  input: unknown,
+  /** Hashed network address from http.ts `clientKey`; null when unknown. Rate limiting only. */
+  clientKey: string | null = null,
+): Promise<PolicyResponse> {
   // Parsed before it is counted: an obviously wrong document should not eat the caller's budget.
   const policy = parsePolicy(input);
+  // Per address first: this request may be the one that started the session, and a client that
+  // drops its cookie would otherwise get a fresh per-session budget (and a new row) every time.
+  await enforceRule(ctx, RATE_LIMITS.policyUpdatePerClient, clientKey ?? UNKNOWN_CLIENT);
   await enforceRule(ctx, RATE_LIMITS.policyUpdatePerSession, sessionId);
   await upsertPolicyDoc(ctx.db, sessionId, policy);
   return getPolicy(ctx, sessionId);

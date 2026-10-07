@@ -281,7 +281,7 @@ function checkWordCount(spec: CopySpec, submission: Submission): Outcome {
   }
   const measured = texts.map((artifact) => {
     // Segment by the language the text is actually written in, not the one the seller claims.
-    const detected = detectLanguage(artifact.text).language;
+    const detected = detectLanguage(artifact.text, { ignore: [spec.subject] }).language;
     return { artifact, words: countWords(artifact.text, detected === "unknown" ? undefined : detected) };
   });
   const outOfRange = measured.filter(({ words }) => words < spec.minWords || words > spec.maxWords);
@@ -305,12 +305,29 @@ function checkWordCount(spec: CopySpec, submission: Submission): Outcome {
   };
 }
 
-function checkEmbeddedInstructions(submission: Submission): Outcome {
+/**
+ * What the buyer's side wrote into the contract and a delivery is expected to echo: the title
+ * and each deliverable's subject and style or tone. A brief about "how to release funds faster"
+ * must not make an honest delivery look like an attempt to steer the verifier. Only the buyer
+ * side writes these fields, so a seller cannot use them to smuggle text past the scan.
+ */
+export function contractOwnWords(contract: Contract): string[] {
+  const words = [contract.title];
+  for (const spec of contract.deliverables) {
+    words.push(spec.subject);
+    const manner = spec.kind === "illustration" ? spec.style : spec.tone;
+    if (manner !== null) words.push(manner);
+  }
+  return words;
+}
+
+function checkEmbeddedInstructions(contract: Contract, submission: Submission): Outcome {
+  const options = { ownWords: contractOwnWords(contract) };
   const flagged = submission.artifacts
-    .map((artifact) => ({ artifact, findings: scanForEmbeddedInstructions(artifact).findings }))
+    .map((artifact) => ({ artifact, findings: scanForEmbeddedInstructions(artifact, options).findings }))
     .filter((entry) => entry.findings.length > 0);
   // The delivery note is read by the same verifier, so it gets the same scrutiny as the files.
-  const noteFindings = scanText({ where: "delivery note", text: submission.note });
+  const noteFindings = scanText({ where: "delivery note", text: submission.note }, options);
   const findings = [
     ...flagged.flatMap(({ artifact, findings: found }) => found.map((finding) => `${artifactLabel(artifact)} ${finding}`)),
     ...noteFindings,
@@ -351,7 +368,7 @@ function evaluateRule(kind: VerificationRuleKind, contract: Contract, spec: Deli
     case "deadline":
       return checkDeadline(contract, submission);
     case "no_embedded_instructions":
-      return checkEmbeddedInstructions(submission);
+      return checkEmbeddedInstructions(contract, submission);
     case "language_coverage":
     case "brief_adherence":
       return notEvaluated("This condition needs judgement and has no deterministic evaluator.");

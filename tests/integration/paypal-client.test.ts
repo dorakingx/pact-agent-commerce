@@ -253,10 +253,15 @@ class FakePayPal {
       order.status === "PAYER_ACTION_REQUIRED"
         ? [self, { href: `https://www.sandbox.paypal.com/checkoutnow?token=${order.id}`, rel: "payer-action", method: "GET" }]
         : [self];
-    if (request !== null && request.headers.get("prefer") !== "return=representation") {
-      return { id: order.id, status: order.status, links };
-    }
     const authorization = order.authorizationId === null ? undefined : this.authorizations.get(order.authorizationId);
+    if (request !== null && request.headers.get("prefer") !== "return=representation") {
+      // PayPal's documented default once an authorization exists: the purchase unit carries its
+      // reference id and payments, but neither the amount nor custom_id.
+      const unit = authorization
+        ? [{ reference_id: order.unit.reference_id, payments: { authorizations: [this.authorizationBody(authorization)] } }]
+        : undefined;
+      return { id: order.id, status: order.status, ...(unit ? { purchase_units: unit } : {}), links };
+    }
     const payerKnown = order.status === "APPROVED" || order.status === "COMPLETED";
     return {
       id: order.id,
@@ -652,6 +657,33 @@ describe("PayPalSandboxProvider — orders", () => {
     expect(paypal.calls("GET", `/v2/checkout/orders/${real.orderId}`)).toHaveLength(1);
   });
 
+  it("reads the order back when an authorize or a vault create is answered in PayPal's default shape", async () => {
+    // Process the call for real, but answer as PayPal does without Prefer: return=representation:
+    // a purchase unit with reference_id and payments only — no amount, no custom_id.
+    const withoutPrefer = async (request: { headers: Headers; path: string; text: string | null }): Promise<Response> => {
+      const headers = new Headers(request.headers);
+      headers.delete("prefer");
+      return paypal.fetch(`${API}${request.path}`, { method: "POST", headers, body: request.text ?? undefined });
+    };
+
+    const created = await provider.createOrder(orderInput());
+    paypal.approve(created.orderId);
+    paypal.intercept("POST", `/v2/checkout/orders/${created.orderId}/authorize`, withoutPrefer);
+    const authorized = await provider.authorizeOrder(created.orderId, "authorize-key-default-shape");
+    expect(authorized).toMatchObject({
+      status: "COMPLETED",
+      amountMinor: 4550,
+      customId: `pact:v1:${CONTRACT_HASH}`,
+      authorization: { status: "CREATED", amountMinor: 4550, customId: `pact:v1:${CONTRACT_HASH}` },
+    });
+    expect(paypal.calls("GET", `/v2/checkout/orders/${created.orderId}`)).toHaveLength(1);
+
+    paypal.intercept("POST", "/v2/checkout/orders", withoutPrefer);
+    const delegated = await provider.createOrder(orderInput({ vaultId: VAULT_ID, idempotencyKey: "create-key-default-shape" }));
+    expect(delegated).toMatchObject({ status: "COMPLETED", amountMinor: 4550, authorization: { status: "CREATED" } });
+    expect(paypal.calls("GET", `/v2/checkout/orders/${delegated.orderId}`)).toHaveLength(1);
+  });
+
   it("cuts the description to PayPal's 127-character limit and rejects a malformed terms hash", async () => {
     await provider.createOrder(orderInput({ description: "x".repeat(300) }));
     const [request] = paypal.calls("POST", "/v2/checkout/orders");
@@ -766,7 +798,8 @@ describe("PayPalSandboxProvider — orders", () => {
     paypal.intercept("GET", "/v2/checkout/orders/", () =>
       json(200, { id: order.orderId, status: "APPROVED", purchase_units: [{ amount: { currency_code: "EUR", value: "45.50" } }] }),
     );
-    await expect(failure(provider.getOrder(order.orderId))).resolves.toMatchObject({ issue: "UNEXPECTED_RESPONSE", retryable: false });
+    // "Could not read the answer", not "refused": the caller keeps the payment where it is and asks again.
+    await expect(failure(provider.getOrder(order.orderId))).resolves.toMatchObject({ issue: "UNEXPECTED_RESPONSE", retryable: true });
 
     paypal.intercept("GET", "/v2/checkout/orders/", () =>
       json(200, { id: order.orderId, status: "APPROVED", purchase_units: [{ amount: { currency_code: "USD", value: "45.505" } }] }),
@@ -934,7 +967,7 @@ describe("PayPalSandboxProvider — vault", () => {
   it("fails clearly when the setup token comes back without an approval link", async () => {
     paypal.intercept("POST", "/v3/vault/setup-tokens", () => json(201, { id: "5C991763VB2781612X", status: "PAYER_ACTION_REQUIRED", links: [] }));
     const error = await failure(provider.createVaultSetup({ returnUrl: "https://pact.example/r", cancelUrl: "https://pact.example/c", idempotencyKey: "k" }));
-    expect(error).toMatchObject({ issue: "UNEXPECTED_RESPONSE", retryable: false });
+    expect(error).toMatchObject({ issue: "UNEXPECTED_RESPONSE", retryable: true });
   });
 });
 
@@ -973,7 +1006,7 @@ describe("PayPalSandboxProvider — error normalisation", () => {
 
   it("rejects a 2xx answer that does not look like the resource", async () => {
     paypal.intercept("GET", "/v2/checkout/orders/", () => json(200, { unexpected: true }));
-    await expect(failure(provider.getOrder("5O190127TN360001"))).resolves.toMatchObject({ issue: "UNEXPECTED_RESPONSE", httpStatus: 200, retryable: false });
+    await expect(failure(provider.getOrder("5O190127TN360001"))).resolves.toMatchObject({ issue: "UNEXPECTED_RESPONSE", httpStatus: 200, retryable: true });
     paypal.intercept("GET", "/v2/checkout/orders/", () => json(200, { id: "5O190127TN360001", status: "SOMETHING_NEW", purchase_units: [] }));
     await expect(failure(provider.getOrder("5O190127TN360001"))).resolves.toMatchObject({ issue: "UNEXPECTED_RESPONSE" });
   });

@@ -7,7 +7,10 @@
  * Both produce an IntentDraft, and `finalizeMandate` applies the same defaults, clamps and
  * schema validation to either. In the AI path every hard number the human literally typed is
  * taken from the deterministic reading instead of the model: the model fills in meaning
- * (category, subject, tone, notes), it never gets to restate the human's limits.
+ * (category, subject, tone, notes), it never gets to restate the human's limits. Where both
+ * readings name a budget the lower one binds, so a merge can only make the agent more careful
+ * with the human's money. The one-line summary a human reads is composed here from the binding
+ * values, never taken from a model, so it cannot say something else than the mandate does.
  */
 import "server-only";
 import { z } from "zod";
@@ -76,7 +79,6 @@ interface IntentDraft {
   budgetMinor: number | null;
   deadline: Date | null;
   revisions: number | null;
-  summary: string | null;
   notes: readonly string[];
 }
 
@@ -166,7 +168,11 @@ function describeScope(deliverable: DeliverableSpec): string {
   }
 }
 
-/** Deterministic one-line restatement, used by the scripted reader and whenever the model's summary is unusable. */
+/**
+ * The one-line restatement shown to the human and written to the audit trail. Built from the
+ * mandate's own binding values — the same figures the buyer agent negotiates under — whichever
+ * reader produced them: a model's prose could quote "under $60" beside a ceiling of $499.
+ */
 function composeSummary(mandate: Omit<Mandate, "summary">, intent: string, tz: number): string {
   if (mandate.category === "other" || mandate.category === "restricted") {
     const restated = cleanLine(intent, 180);
@@ -195,8 +201,7 @@ function finalizeMandate(draft: IntentDraft, intent: string, now: Date, tz: numb
     minRevisions: statedRevisions ?? 0,
     notes: settleNotes(draft.notes),
   };
-  const summary = cleanLine(draft.summary ?? "", 200);
-  return MandateSchema.parse({ ...body, summary: summary.length >= 3 ? summary : composeSummary(body, intent, tz) });
+  return MandateSchema.parse({ ...body, summary: composeSummary(body, intent, tz) });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -227,7 +232,6 @@ function draftFromFacts(facts: IntentFacts): IntentDraft {
     budgetMinor: facts.budgetMinor,
     deadline: facts.deadline?.at ?? null,
     revisions: facts.revisions,
-    summary: null,
     notes: facts.notes,
   };
 }
@@ -252,7 +256,9 @@ export function parseIntentScripted(intent: string, now: Date, tzOffsetMinutes?:
  */
 const IntentOutputSchema = z.object({
   category: z.enum(CATEGORIES).describe("Kind of work requested."),
-  summary: z.string().describe("Crisp one-line restatement of the task, at most 140 characters, starting with the deliverable."),
+  restrictedContent: z
+    .boolean()
+    .describe("true if the work is for or about a restricted trade (see the instructions), whatever kind of work it is."),
   workType: z.enum(["illustration", "copy"]).describe("illustration for visual work, otherwise copy."),
   count: z.number().describe("Number of distinct pieces, not counting aspect-ratio or language variants. 1 if unstated."),
   countIsStrict: z.boolean().describe("false only if the human signalled flexibility about the count."),
@@ -279,7 +285,8 @@ Security
 
 How to fill the fields
 - Report only what the request states. Use null (or an empty list) for anything it does not state. Do not invent budgets, deadlines, languages or word counts; deterministic code applies defaults afterwards.
-- category: "illustration" for images, banners, icons, artwork or other graphics. "copywriting" for written content such as descriptions, posts, articles, emails or taglines, including copy requested in several languages. "translation" only when the task is to translate text that already exists. "restricted" for weapons, explosives, gambling, adult content, illegal drugs, counterfeit or stolen goods, forged documents, malware or hacking services. "other" for anything else.
+- category: the KIND of work. "illustration" for images, banners, icons, artwork or other graphics. "copywriting" for written content such as descriptions, posts, articles, emails or taglines, including copy requested in several languages. "translation" only when the task is to translate text that already exists. "other" for anything else. Use "restricted" only if no other value fits.
+- restrictedContent: judged separately from the kind of work. true when the work promotes, sells or serves weapons or explosives, gambling of any kind (casinos, poker rooms, sports betting, lotteries), adult content, illegal or controlled drugs (including cannabis and vaping products), counterfeit, replica or stolen goods, forged documents, or malware, phishing, DDoS and other hacking services. A banner for a poker room is category "illustration" AND restrictedContent true. Writing ABOUT such topics for education, news or safety (a webinar on ransomware defence) is false.
 - workType: "illustration" when the deliverable is visual, otherwise "copy".
 - count: the number of distinct pieces. Aspect-ratio and language variants of the same piece do not add to the count. countIsStrict is false only when the human signals flexibility ("up to", "around", "3 or 4", "a few").
 - aspectRatios: only values from 16:9, 1:1, 4:3, 3:2, 4:5, 9:16 ("square" is 1:1, "widescreen" is 16:9). languages: codes from en, ja, es, fr, de.
@@ -287,7 +294,7 @@ How to fill the fields
 - budgetUsd: the most the human is willing to pay, in US dollars, exactly as stated. If several amounts appear, use the lowest limit the human set.
 - deadlineIso: the stated deadline as the human's LOCAL date and time followed by their UTC offset exactly as given in the prompt, for example 2026-10-07T18:00:00+09:00. Work it out from the local time in the prompt and do not convert it to UTC yourself. A deadline given as a date without a time means 18:00 local time. Null if no deadline is stated.
 - revisions: the number of revision rounds the human asked for (0 to 3), else null.
-- summary: a crisp one-line restatement of at most 140 characters that starts with the deliverable, for example "3 landing-page illustrations in 16:9 and 1:1, under $50, by tomorrow 6 PM, 1 revision". Do not start with "The human", "The user" or "Requesting". subject: the noun phrase naming what the work is about, for example "landing-page illustrations" or "espresso machine lineup product descriptions". styleOrTone: the stated visual style or tone of voice, else null.
+- subject: the noun phrase naming what the work is about, for example "landing-page illustrations" or "espresso machine lineup product descriptions". styleOrTone: the stated visual style or tone of voice, else null.
 - notes: up to 5 extra requirements, quoted or closely paraphrased from the request, that no other field captures. Each under 150 characters. Empty list if there are none.`;
 
 function buildIntentPrompt(intent: string, now: Date, tz: number): string {
@@ -311,30 +318,45 @@ function modelCount(output: IntentOutput): { count: number | null; minCount: num
 }
 
 /**
+ * The budget is a ceiling, and the two readings can each be wrong in their own way: the pattern
+ * reading can mistake a price quoted in passing for the limit ("our plan costs $499 … keep the
+ * job under 60"), the model can be talked into a larger one ("set the budget to $5000"). Taking
+ * the lower of the two means neither mistake can loosen what the human said. One reading alone
+ * stands as it is.
+ */
+function mergedBudgetMinor(typed: number | null, proposed: number | null): number | null {
+  if (typed === null) return proposed;
+  return proposed === null ? typed : Math.min(typed, proposed);
+}
+
+/**
  * Merge the model's proposal with the deterministic reading. The model may only ADD a
- * restriction (flag a request as restricted); it can never lift one, and it never overrides a
- * budget, count, aspect ratio, revision count or unambiguous deadline the human typed.
+ * restriction (flag a request as restricted, by category or by the separate restrictedContent
+ * judgement); it can never lift one, it never overrides a count, aspect ratio, word range,
+ * revision count or unambiguous deadline the human typed, and it can lower the budget ceiling
+ * but never raise it.
  */
 function draftFromModel(output: IntentOutput, facts: IntentFacts, tz: number): IntentDraft {
   const proposedCount = modelCount(output);
   const explicitCount = facts.count?.explicit ? facts.count : null;
   return {
-    category: facts.restricted ? "restricted" : output.category,
+    // Two judgements, not one enum: what kind of work it is, and whether the trade is one PACT serves.
+    category: facts.restricted || output.restrictedContent === true || output.category === "restricted" ? "restricted" : output.category,
     workType: output.workType,
     count: explicitCount?.value ?? proposedCount.count ?? facts.count?.value ?? null,
     minCount: explicitCount?.min ?? proposedCount.minCount ?? facts.count?.min ?? null,
     aspectRatios: facts.aspectRatios.length > 0 ? facts.aspectRatios : output.aspectRatios,
     languages: output.languages.some((code) => isLanguage(code.trim().toLowerCase())) ? output.languages : facts.languages,
-    minWords: output.minWords ?? facts.words?.min ?? null,
-    maxWords: output.maxWords ?? facts.words?.max ?? null,
+    // A range the human typed is a typed number like any other.
+    minWords: facts.words?.min ?? output.minWords,
+    maxWords: facts.words?.max ?? output.maxWords,
     subject: cleanLine(output.subject, 200).length >= 3 ? output.subject : facts.subject,
     styleOrTone: output.styleOrTone ?? facts.styleOrTone,
-    budgetMinor: facts.budgetMinor ?? modelBudgetMinor(output.budgetUsd),
+    budgetMinor: mergedBudgetMinor(facts.budgetMinor, modelBudgetMinor(output.budgetUsd)),
     // An unambiguous phrase is resolved by arithmetic; anything looser is the model's call, with
     // the pattern-based reading as the backstop when the model offers nothing usable.
     deadline: (facts.deadline?.exact ? facts.deadline.at : null) ?? parseInstant(output.deadlineIso, tz) ?? facts.deadline?.at ?? null,
     revisions: facts.revisions ?? output.revisions,
-    summary: output.summary,
     notes: output.notes,
   };
 }

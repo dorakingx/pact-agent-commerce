@@ -4,7 +4,7 @@
  * hashing, no state machine, no policy; those belong to the service layer and its engines.
  */
 export { getLastAuditEvent, insertAuditEvent, listAuditEvents } from "./audit";
-export { getContractByDeal, insertContract } from "./contracts";
+export { findDealIdByContractBinding, getContractByDeal, insertContract } from "./contracts";
 export {
   acquireDealLease,
   countDealsCreatedSince,
@@ -13,6 +13,7 @@ export {
   insertDeal,
   listDealsByOwner,
   listDealsForOwners,
+  listStalledDealIds,
   releaseDealLease,
   sumAuthorizedSince,
   updateDeal,
@@ -32,10 +33,12 @@ export {
   findDealIdByCaptureId,
   findDealIdByOrderId,
   getPayment,
+  getPaymentFunding,
+  setPaymentFunding,
   upsertPayment,
 } from "./payments";
 export { getPolicyDoc, upsertPolicyDoc } from "./policies";
-export { hitRateLimit, type RateLimitResult } from "./rate-limit";
+export { deleteStaleRateLimits, hitRateLimit, type RateLimitResult } from "./rate-limit";
 export { createDbSimulatedStore } from "./simulator";
 export { deleteWallet, getWallet, upsertWallet, type WalletInput } from "./wallets";
 export {
