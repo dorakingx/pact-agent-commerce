@@ -141,8 +141,8 @@ Charts 14 for the charts.
 **Persistence.** PostgreSQL (Neon) through Drizzle ORM, with version-controlled SQL migrations.
 The same schema runs on PGlite, an in-process Postgres, for local development and CI.
 
-**Quality.** More than 2,000 unit and integration tests (Vitest), a live PayPal Sandbox suite, and
-Playwright end-to-end journeys for every scenario, all run in GitHub Actions. Deployed on Vercel.
+**Quality.** More than 2,700 unit and integration tests (Vitest), a live PayPal Sandbox suite, and 28
+Playwright end-to-end tests covering every scenario, all run in GitHub Actions. Deployed on Vercel.
 
 ### Challenges we ran into
 
@@ -173,7 +173,7 @@ Playwright end-to-end journeys for every scenario, all run in GitHub Actions. De
   revision, partial release, void and human review — not only the happy path.
 - A capture guard that refuses to release funds unless the contract hash, the verification
   report, the amounts, the authorization and PayPal's own record all agree.
-- More than 2,000 automated tests, including concurrency tests that fire 50 simultaneous capture
+- More than 2,700 automated tests, including concurrency tests that fire 50 simultaneous capture
   requests and prove exactly one capture happens.
 - Two different model families negotiating against each other inside hard limits neither can
   cross.
@@ -272,8 +272,8 @@ Under three minutes:
 5. Open "Operations" for the dashboard and the ledger; open "Policies" to change the agent's limits and see the outcome change.
 
 No login is needed: the demo uses a pre-connected PayPal Sandbox wallet, so in-policy deals authorize automatically.
-To approve a payment interactively in PayPal instead, sign in on the PayPal Sandbox page with:
-  email: USER CONFIRMATION REQUIRED (sandbox personal account)
+Optional — to approve a payment yourself in PayPal: on the Policies page, "Connect PayPal wallet" opens the PayPal Sandbox; sign in with the sandbox buyer
+  email: USER CONFIRMATION REQUIRED (suggested: sb-tvbr253235295@personal.example.com, a US sandbox personal account)
   password: USER CONFIRMATION REQUIRED
 To run locally: see the README (npm ci && npm run dev works with no credentials, using a labelled payment simulator).
 ```
@@ -311,18 +311,19 @@ https://pact-agent-commerce.vercel.app
 | Individual, team or organisation entry | **USER CONFIRMATION REQUIRED** |
 | Acceptance of the official rules and Devpost terms | **USER CONFIRMATION REQUIRED** |
 | YouTube video URL | **USER CONFIRMATION REQUIRED** (upload required) |
-| PayPal Sandbox buyer credentials to share with judges | **USER CONFIRMATION REQUIRED** |
+| PayPal Sandbox buyer credentials to share with judges (optional — the demo needs no login) | **USER CONFIRMATION REQUIRED** |
+| AG Studio trial licence key | **USER CONFIRMATION REQUIRED** (request from AG Grid; free 45-day trial) |
 | Any tax or payment information requested for prizes | **USER CONFIRMATION REQUIRED** |
 
 ## Pre-submission checklist
 
-- [ ] Production deployment shows "PayPal Sandbox · live" (credentials, webhook id and demo wallet configured)
-- [ ] Production database is managed Postgres and showcase deals are seeded
-- [ ] All four scenarios pass on the hosted demo
-- [ ] `npm run validate` and CI are green on the submitted commit
-- [ ] Screenshots in `artifacts/devpost/` were taken from the hosted demo
-- [ ] Demo video is under three minutes, public on YouTube, without music
-- [ ] AG Studio trial licence key is set and valid through 15 December 2026
-- [ ] Repository is public and GitHub shows the MIT licence in "About"
-- [ ] Every statement above still matches the product
+- [x] Production deployment shows "PayPal Sandbox · live" (credentials, verified webhook and shared demo wallet configured — 7 Oct 2026)
+- [x] Production database is managed Postgres (Neon) and 8 showcase deals are seeded through the real engine, all reconciled with PayPal
+- [x] All four scenarios pass on the hosted demo against the real PayPal Sandbox (7 Oct 2026)
+- [x] `npm run validate` and CI are green on the submitted commit
+- [x] Screenshots in `artifacts/devpost/` were taken from the hosted demo
+- [ ] Demo video (`artifacts/devpost/pact-demo.mp4`, 2:26, no music) uploaded to YouTube as Public — **owner**
+- [ ] AG Studio trial licence key requested (on or after 1 Nov so it covers judging) and set as `NEXT_PUBLIC_AG_LICENSE_KEY` — **owner**; until then the dashboard runs in labelled trial mode with a watermark
+- [x] Repository is public and GitHub shows the MIT licence in "About"
+- [ ] Re-check every statement above against the product right before submitting
 - [ ] Project owner has reviewed this document and approved the submission

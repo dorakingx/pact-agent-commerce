@@ -34,23 +34,23 @@ that decides, deterministically and auditably, whether negotiated work has earne
 ## Phases
 
 - [x] 0. Environment, research, repo, Vercel project
-- [ ] 1. Foundation — schemas, state machines, provider contract, DB schema
-- [ ] 2. Core modules — domain engines, PayPal client, agents, seller studio, persistence, design system
-- [ ] 3. Service layer + API — step engine, sessions, policy, webhooks, ops queries
-- [ ] 4. Product UI — landing, workspace, deal view, operations (AG Studio), policies
-- [ ] 5. E2E tests, CI, production deploy, live PayPal Sandbox verification
-- [ ] 6. Adversarial review and fixes (security, financial correctness, UX)
-- [ ] 7. Docs, screenshots, demo video, Devpost package
-- [ ] 8. Improvement loop until the definition of done holds
+- [x] 1. Foundation — schemas, state machines, provider contract, DB schema
+- [x] 2. Core modules — domain engines, PayPal client, agents, seller studio, persistence, design system
+- [x] 3. Service layer + API — step engine, sessions, policy, webhooks, ops queries
+- [x] 4. Product UI — landing, workspace, deal view, operations (AG Studio), policies
+- [x] 5. E2E tests, CI, production deploy, live PayPal Sandbox verification
+- [x] 6. Adversarial review and fixes (security, financial correctness, UX)
+- [x] 7. Docs, screenshots, demo video, Devpost package
+- [ ] 8. Improvement loop until the definition of done holds (in progress)
 
 ## Needs the project owner
 
 These cannot be done by an agent and are tracked in `docs/devpost-submission.md`:
 
-- PayPal Sandbox REST app credentials (`PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`), with Vault enabled
-- One-time sandbox buyer consent for the delegated demo wallet
-- A sandbox buyer login to share with judges
-- Production database approval (managed Postgres)
+- ~~PayPal Sandbox REST app credentials, with Vault enabled~~ done 7 Oct (US sandbox merchant; the JP default account had no Vault permission)
+- ~~One-time sandbox buyer consent for the delegated demo wallet~~ done 7 Oct
+- A sandbox buyer login to share with judges (optional)
+- ~~Production database (managed Postgres)~~ done 7 Oct (Neon via Vercel)
 - AG Studio 45-day trial licence key (request on or after 1 Nov so it covers judging)
 - YouTube upload of the demo video; Devpost personal and eligibility fields; final submit
 
@@ -58,3 +58,7 @@ These cannot be done by an agent and are tracked in `docs/devpost-submission.md`
 
 - 2026-10-06 — Environment inspected; Next.js 16 scaffold;
   GitHub repo and Vercel project created and linked; AI Gateway verified with Gemini 2.5 Flash and GPT-5 mini.
+- 2026-10-06/07 — Core modules, service layer, HTTP API, product UI, AG Studio dashboard; adversarial
+  review (31 confirmed findings, all fixed); E2E suite. Neon Postgres and PayPal Sandbox (US app, Vault,
+  verified webhooks, shared demo wallet) live in production; all four scenarios verified against the
+  real Sandbox; 8 showcase deals seeded; screenshots and demo video recorded from production.

@@ -4,7 +4,19 @@ All notable changes to PACT. The project follows [Semantic Versioning](https://s
 
 ## [Unreleased]
 
+### Fixed
+
+- Hardening after an adversarial review: recovery of unknown-outcome orders and voids, webhook
+  verification budget and payer-data minimisation, operator cap on the shared demo wallet, verifier
+  coverage of every delivered file, strict "under $X" budgets, restricted-category detection.
+
+
 ### Added
+
+- Product UI: workspace, live deal view, AG Grid ledger, AG Studio dashboard with a custom auditor
+  agent, policies with a live preview, delegated wallet, "how it works" page.
+- Settlement sweep (scheduled) so settlement never depends on an open browser tab.
+- Playwright journeys for every scenario; demo recording and screenshot scripts.
 
 - Deterministic domain core: seller-first negotiation rules with clamps and vetoes, contract
   compiler with SHA-256 terms hash, five-check spending policy, per-rule verification with a
