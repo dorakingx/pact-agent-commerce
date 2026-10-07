@@ -6,7 +6,7 @@
 
 AI agents can negotiate. PACT makes sure they only get paid when the deal is done.
 
-[Live demo](https://pact-agent-commerce.vercel.app) · [How it works](https://pact-agent-commerce.vercel.app/how-it-works) · [Architecture](docs/architecture.md) · [Security model](docs/security.md) · [Demo script](docs/demo-script.md)
+[Live demo](https://pact-agent-commerce.vercel.app) · [Demo video](https://youtu.be/uacRihJmobY) · [How it works](https://pact-agent-commerce.vercel.app/how-it-works) · [Architecture](docs/architecture.md) · [Security model](docs/security.md) · [Demo script](docs/demo-script.md)
 
 ![PACT — live deal view](artifacts/devpost/01-landing.png)
 

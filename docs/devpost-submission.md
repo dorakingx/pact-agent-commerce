@@ -40,8 +40,12 @@ Upload from `artifacts/devpost/` in this order (3:2, PNG):
 
 ## Video demo link
 
-**USER CONFIRMATION REQUIRED** — upload `artifacts/devpost/pact-demo.mp4` to YouTube as *Public*
-and paste the link. Script: `docs/demo-script.md`. Length under three minutes, no music.
+```
+https://youtu.be/uacRihJmobY
+```
+
+Public on YouTube since 7 Oct 2026 (2:26, no music). Source file: `artifacts/devpost/pact-demo.mp4`;
+script: `docs/demo-script.md`.
 
 ## "Try it out" links
 
@@ -310,7 +314,7 @@ https://pact-agent-commerce.vercel.app
 | Not an employee / household member of PayPal, Devpost or a sponsor; not a judge | **USER CONFIRMATION REQUIRED** |
 | Individual, team or organisation entry | **USER CONFIRMATION REQUIRED** |
 | Acceptance of the official rules and Devpost terms | **USER CONFIRMATION REQUIRED** |
-| YouTube video URL | **USER CONFIRMATION REQUIRED** (upload required) |
+| YouTube video URL | https://youtu.be/uacRihJmobY (published) |
 | PayPal Sandbox buyer credentials to share with judges (optional — the demo needs no login) | **USER CONFIRMATION REQUIRED** |
 | AG Studio trial licence key | **USER CONFIRMATION REQUIRED** (request from AG Grid; free 45-day trial) |
 | Any tax or payment information requested for prizes | **USER CONFIRMATION REQUIRED** |
@@ -322,7 +326,7 @@ https://pact-agent-commerce.vercel.app
 - [x] All four scenarios pass on the hosted demo against the real PayPal Sandbox (7 Oct 2026)
 - [x] `npm run validate` and CI are green on the submitted commit
 - [x] Screenshots in `artifacts/devpost/` were taken from the hosted demo
-- [ ] Demo video (`artifacts/devpost/pact-demo.mp4`, 2:26, no music) uploaded to YouTube as Public — **owner**
+- [x] Demo video public on YouTube: https://youtu.be/uacRihJmobY
 - [ ] AG Studio trial licence key requested (on or after 1 Nov so it covers judging) and set as `NEXT_PUBLIC_AG_LICENSE_KEY` — **owner**; until then the dashboard runs in labelled trial mode with a watermark
 - [x] Repository is public and GitHub shows the MIT licence in "About"
 - [ ] Re-check every statement above against the product right before submitting
