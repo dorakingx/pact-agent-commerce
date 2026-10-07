@@ -4,7 +4,7 @@ Target length **2:40–2:50** (hard limit 3:00). 1920×1080, recorded from the h
 PayPal Sandbox. No music. English narration; on-screen captions carry the same message for
 viewers watching without sound.
 
-The recording is automated (`scripts/demo/record.ts`, Playwright) so it can be re-shot after any
+The recording is automated (`scripts/demo/record.mts`, Playwright) so it can be re-shot after any
 change; narration can be replaced with a human voice-over using the timings below.
 
 ## Storyboard
