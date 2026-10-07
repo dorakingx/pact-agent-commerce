@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useRouter } from "next/navigation";
-import { Button, Callout, LinkButton } from "@/components/ui";
+import { Button, Callout, LinkButton, useHydrated } from "@/components/ui";
 import { ApiClientError, api } from "@/lib/client/api";
 // Type-only: the service module itself is server-side and never reaches the browser bundle.
 import type { ApprovalOutcome, PayPalReturnResult } from "@/lib/services/deals";
@@ -37,6 +37,8 @@ export function ApprovalActions({ orderId, dealId, awaitingPayer }: ApprovalActi
   const router = useRouter();
   const [running, setRunning] = useState<Action | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Server-rendered: until hydration a click would be silently lost.
+  const hydrated = useHydrated();
 
   async function approve(): Promise<PayPalReturnResult> {
     const { outcome } = await api.post<{ dealId: string; outcome: ApprovalOutcome }>("/api/simulated/approve", { orderId });
@@ -78,10 +80,10 @@ export function ApprovalActions({ orderId, dealId, awaitingPayer }: ApprovalActi
     <div className="flex flex-col gap-3">
       {error === null ? null : <Callout tone="danger">{error}</Callout>}
       <div className="flex flex-col-reverse gap-2.5 sm:flex-row sm:justify-end">
-        <Button variant="secondary" onClick={() => void run("cancel")} loading={running === "cancel"} disabled={running !== null}>
+        <Button variant="secondary" onClick={() => void run("cancel")} loading={running === "cancel"} disabled={running !== null || !hydrated}>
           Cancel
         </Button>
-        <Button onClick={() => void run("approve")} loading={running === "approve"} disabled={running !== null}>
+        <Button onClick={() => void run("approve")} loading={running === "approve"} disabled={running !== null || !hydrated}>
           Approve simulated hold
         </Button>
       </div>

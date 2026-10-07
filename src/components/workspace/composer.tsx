@@ -2,7 +2,7 @@
 
 import { useId } from "react";
 import { ArrowRight, Pin, Store, X } from "lucide-react";
-import { Badge, Button, Card, CardFooter, Kbd, Label, Textarea, cn } from "@/components/ui";
+import { Badge, Button, Card, CardFooter, Kbd, Label, Textarea, cn, useHydrated } from "@/components/ui";
 import { RequestError } from "@/components/deal/parts";
 import { INTENT_MAX_CHARS, INTENT_MIN_CHARS, intentState, scenarioEdited } from "@/lib/client/deal-derive-compose";
 import type { ScenarioOption } from "./scenario-picker";
@@ -33,7 +33,9 @@ export function Composer({ text, onTextChange, scenario, onClearScenario, creati
   const hintId = `${fieldId}-hint`;
   const state = intentState(text);
   const edited = scenarioEdited(text, scenario ?? undefined);
-  const canSubmit = state.valid && !creating;
+  // Before hydration the button would post the form to the page itself instead of starting a deal.
+  const hydrated = useHydrated();
+  const canSubmit = state.valid && !creating && hydrated;
 
   function submit(event: React.FormEvent<HTMLFormElement>): void {
     event.preventDefault();

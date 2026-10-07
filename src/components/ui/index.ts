@@ -121,3 +121,4 @@ export {
   type Theme,
 } from "./theme";
 export { ThemeSync, useTheme, type UseTheme } from "./use-theme";
+export { useHydrated } from "./use-hydrated";

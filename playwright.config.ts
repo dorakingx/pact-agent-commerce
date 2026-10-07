@@ -25,10 +25,21 @@ export default defineConfig({
   fullyParallel: true,
   forbidOnly: IS_CI,
   retries: IS_CI ? 1 : 0,
+  // Ceilings, not budgets: every wait is on visible state, and a loaded machine should slow the
+  // suite down rather than fail it. UI flows that run a whole deal set their own, longer limit.
+  timeout: 60_000,
+  expect: { timeout: 10_000 },
   reporter: IS_CI ? [["list"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: BASE_URL,
     trace: "retain-on-failure",
+    /*
+     * Headless Chromium composites in software. A live deal keeps a few small looping indicators
+     * (spinner, pulse dots) under the sticky bar's backdrop blur, which costs a CPU core per page
+     * there and made parallel runs about four times slower. The product honours reduced motion,
+     * so the specs run with it; the happy-path walk-through opts back in to full motion.
+     */
+    contextOptions: { reducedMotion: "reduce" },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {
