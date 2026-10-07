@@ -316,7 +316,6 @@ https://pact-agent-commerce.vercel.app
 | Acceptance of the official rules and Devpost terms | **USER CONFIRMATION REQUIRED** |
 | YouTube video URL | https://youtu.be/uacRihJmobY (published) |
 | PayPal Sandbox buyer credentials to share with judges (optional — the demo needs no login) | **USER CONFIRMATION REQUIRED** |
-| AG Studio trial licence key | **USER CONFIRMATION REQUIRED** (request from AG Grid; free 45-day trial) |
 | Any tax or payment information requested for prizes | **USER CONFIRMATION REQUIRED** |
 
 ## Pre-submission checklist
@@ -327,7 +326,7 @@ https://pact-agent-commerce.vercel.app
 - [x] `npm run validate` and CI are green on the submitted commit
 - [x] Screenshots in `artifacts/devpost/` were taken from the hosted demo
 - [x] Demo video public on YouTube: https://youtu.be/uacRihJmobY
-- [ ] AG Studio trial licence key requested (on or after 1 Nov so it covers judging) and set as `NEXT_PUBLIC_AG_LICENSE_KEY` — **owner**; until then the dashboard runs in labelled trial mode with a watermark
+- [x] AG Studio licence: decided by the owner to run without a key; the dashboard runs in AG Studio's trial mode (watermark, labelled "AG Studio trial mode" in the header)
 - [x] Repository is public and GitHub shows the MIT licence in "About"
 - [ ] Re-check every statement above against the product right before submitting
 - [ ] Project owner has reviewed this document and approved the submission

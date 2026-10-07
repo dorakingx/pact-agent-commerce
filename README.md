@@ -239,6 +239,8 @@ capture — are in [docs/security.md](docs/security.md).
   external sellers is future work.
 - **Anonymous sessions.** The demo has no user accounts; a signed cookie is the identity.
 - **Semantic verification is probabilistic.** That is why ambiguity goes to a human instead of to capture.
+- **AG Studio runs in trial mode.** No licence key is configured, so the dashboard shows AG Studio's
+  trial watermark; every feature works. The ledger tab uses AG Grid Community and needs no key.
 - **Authorizations expire.** PayPal honours an authorization for 3 days and keeps it valid for 29;
   long contracts need re-authorization, which the client supports but the demo does not exercise.
 
