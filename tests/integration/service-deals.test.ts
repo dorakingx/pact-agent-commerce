@@ -188,7 +188,8 @@ describe("step engine: the four demo scenarios", () => {
       contract: null,
     });
     expect(created.code).toMatch(/^PACT-[2-9A-HJ-NP-Z]{4}$/);
-    expect(created.mandate).toMatchObject({ category: "illustration", budgetMinor: 5000 });
+    // "under $50" excludes $50 itself.
+    expect(created.mandate).toMatchObject({ category: "illustration", budgetMinor: 4999 });
 
     // One advance, one step: it stops by itself where the payer has to act.
     const waiting = await advanceToGate(run);

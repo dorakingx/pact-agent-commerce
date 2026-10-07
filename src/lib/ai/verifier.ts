@@ -31,7 +31,7 @@ import {
   type VerificationCheck,
   type VerificationRule,
 } from "../domain/schemas";
-import { countWords, detectLanguage } from "../domain/verification";
+import { countWords, detectLanguage, moreConservative } from "../domain/verification";
 import { callStructured } from "./gateway";
 import { rasterizeSvg } from "./raster";
 import { cleanLine, dataBlock, type AgentDeps } from "./shared";
@@ -506,15 +506,15 @@ function postProcess(
   ctx: AiVerificationContext,
   unseen: readonly Artifact[],
 ): { checks: VerificationCheck[]; flags: AiVerificationFlags } {
-  // First result per rule id wins; results for ids that are not in the contract are dropped.
-  const byRule = new Map<string, VerifierOutput["checks"][number]>();
+  // Results for ids that are not in the contract are dropped.
+  const byRule = new Map<string, VerifierOutput["checks"][number][]>();
   for (const check of output.checks) {
     const id = normaliseRuleId(check.ruleId);
-    if (!byRule.has(id)) byRule.set(id, check);
+    byRule.set(id, [...(byRule.get(id) ?? []), check]);
   }
   const checks = ctx.rules.map((rule) => {
-    const verdict = byRule.get(normaliseRuleId(rule.id));
-    if (!verdict) {
+    const verdicts = byRule.get(normaliseRuleId(rule.id)) ?? [];
+    if (verdicts.length === 0) {
       return checkFor(rule, ctx, {
         result: "uncertain",
         confidence: 0,
@@ -522,7 +522,11 @@ function postProcess(
         explanation: "The verifier did not return a result for this rule",
       });
     }
-    return limitToWhatWasSeen(crossCheckLanguages(checkFor(rule, ctx, verdict), ctx), unseen);
+    // A model that answers one rule more than once (say, once per item) has not passed it if any
+    // answer says otherwise: the result worse for the seller stands, as for duplicate checks in
+    // the domain layer. Keeping the first would let a later "fail" for the same rule vanish.
+    const verdict = verdicts.map((entry) => checkFor(rule, ctx, entry)).reduce(moreConservative);
+    return limitToWhatWasSeen(crossCheckLanguages(verdict, ctx), unseen);
   });
   const quote = cleanLine(output.manipulationEvidence ?? "", MAX_MANIPULATION_EVIDENCE_CHARS);
   const flags: AiVerificationFlags = output.manipulationSuspected

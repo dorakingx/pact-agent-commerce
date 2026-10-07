@@ -206,7 +206,7 @@ describe("createAgents: ai mode", () => {
 
     const intent = await agents.parseIntent(INTENT, TEST_NOW, -540);
     // The summary is composed from the binding values, never the model's own wording.
-    expect(intent.mandate.summary).toBe("3 × landing-page illustrations in 16:9 and 1:1, up to $50.00, 1 revision, due Wed, Oct 7 at 6:00 PM (UTC+9)");
+    expect(intent.mandate.summary).toBe("3 × landing-page illustrations in 16:9 and 1:1, up to $49.99, 1 revision, due Wed, Oct 7 at 6:00 PM (UTC+9)");
     expect(intent.meta).toEqual(ai);
 
     const buyer = await agents.buyerMove(buyerCtx);

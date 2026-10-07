@@ -35,6 +35,12 @@ export interface IntentFacts {
   languages: Language[];
   words: { min: number; max: number } | null;
   budgetMinor: number | null;
+  /**
+   * Figures (in minor units) the request introduces with a STRICT comparative — "under 60",
+   * "less than $50" — whether or not they are written as money. A model reading the same words
+   * reports the figure itself; this is how its reading is held to the same strictness.
+   */
+  strictCeilingsMinor: number[];
   /** `exact` is false when the phrase could mean something else in context (see DeadlineReading). */
   deadline: { at: Date; exact: boolean } | null;
   revisions: number | null;
@@ -178,12 +184,33 @@ const MONEY_PATTERNS: readonly RegExp[] = [
 const CEILING_BEFORE =
   /(?:under|below|less than|max(?:imum)?|up to|at most|no more than|not exceed(?:ing)?|not more than|budget|cap(?:ped)?|ceiling|limit|within|spend(?:ing)?)(?:\s+(?:is|of|at|to|around|about|only|just|total))*\s*[:=]?\s*$/;
 const CEILING_AFTER = /^\s*(?:budget|max(?:imum)?|limit|cap|or less|or under|at most|tops|total)\b/;
+/**
+ * Comparatives that EXCLUDE the figure they name: "under $50" does not allow $50.00, so the
+ * ceiling is one cent below it. "Up to", "max", "at most", "no more than", "budget is" and
+ * "or less" include the figure. "No less than" / "not less than" state a floor, not this.
+ */
+const STRICT_WORDS = String.raw`(?<!\bno\s|\bnot\s)\b(?:under|below|less than|lower than|cheaper than)`;
+const STRICT_FILLER = String.raw`(?:\s+(?:is|of|at|to|around|about|only|just|total))*\s*[:=]?\s*`;
+const STRICT_BEFORE = new RegExp(`${STRICT_WORDS}${STRICT_FILLER}$`);
+/** A strict comparative and the figure after it, with or without a currency marker. */
+const STRICT_FIGURE = new RegExp(String.raw`${STRICT_WORDS}${STRICT_FILLER}(?:\$\s?|usd\s?)?${AMOUNT}(?![\d.,]*\s?(?:%|percent|words?|days?|hours?|minutes?|weeks?|months?|px|pixels?)\b)`, "g");
+
+/** The most a ceiling allows: the figure itself, or a cent less when the comparative excludes it. */
+function ceilingMinor(minor: number, strict: boolean): number {
+  return strict ? Math.max(0, minor - 1) : minor;
+}
+
+function toMinorUnits(whole: string, cents: string | undefined, thousands = false): number {
+  return Number(whole.replace(/,/g, "")) * (thousands ? 1000 : 1) * 100 + Number((cents ?? "").padEnd(2, "0"));
+}
 
 interface MoneyMention {
   minor: number;
   span: Span;
   /** The amount is introduced as a ceiling ("under $50", "$40 budget"). */
   ceiling: boolean;
+  /** The ceiling excludes the amount itself ("under $50", "less than $50"). */
+  strict: boolean;
 }
 
 function moneyMentions(lower: string): MoneyMention[] {
@@ -192,14 +219,12 @@ function moneyMentions(lower: string): MoneyMention[] {
     for (const m of lower.matchAll(pattern)) {
       const span = { start: m.index, end: m.index + m[0].length };
       if (overlapsAny(span, mentions.map((x) => x.span))) continue;
-      const whole = Number(m[1].replace(/,/g, "")) * (m[3] ? 1000 : 1);
-      const minor = whole * 100 + Number((m[2] ?? "").padEnd(2, "0"));
+      const minor = toMinorUnits(m[1], m[2], m[3] !== undefined);
       if (!Number.isSafeInteger(minor)) continue;
-      const ceiling =
-        /budget/.test(m[0]) ||
-        CEILING_BEFORE.test(lower.slice(Math.max(0, span.start - 32), span.start)) ||
-        CEILING_AFTER.test(lower.slice(span.end, span.end + 16));
-      mentions.push({ minor, span, ceiling });
+      const before = lower.slice(Math.max(0, span.start - 32), span.start);
+      const strict = STRICT_BEFORE.test(before);
+      const ceiling = /budget/.test(m[0]) || strict || CEILING_BEFORE.test(before) || CEILING_AFTER.test(lower.slice(span.end, span.end + 16));
+      mentions.push({ minor, span, ceiling, strict });
     }
   }
   return mentions;
@@ -215,7 +240,26 @@ function readBudget(lower: string): { minor: number | null; spans: Span[] } {
   if (mentions.length === 0) return { minor: null, spans: [] };
   const ceilings = mentions.filter((m) => m.ceiling);
   const pool = ceilings.length > 0 ? ceilings : mentions;
-  return { minor: Math.min(...pool.map((m) => m.minor)), spans: mentions.map((m) => m.span) };
+  return { minor: Math.min(...pool.map((m) => ceilingMinor(m.minor, m.strict))), spans: mentions.map((m) => m.span) };
+}
+
+/** Every figure introduced by a strict comparative, as minor units (see IntentFacts.strictCeilingsMinor). */
+function readStrictCeilings(lower: string): number[] {
+  const figures: number[] = [];
+  for (const m of lower.matchAll(STRICT_FIGURE)) {
+    const minor = toMinorUnits(m[1], m[2]);
+    if (Number.isSafeInteger(minor)) figures.push(minor);
+  }
+  return figures;
+}
+
+/**
+ * A model's budget reading held to the request's own strictness: when the request puts that very
+ * figure behind "under" or "less than", the figure itself is not allowed and a cent comes off.
+ */
+export function strictModelBudgetMinor(proposedMinor: number | null, strictCeilingsMinor: readonly number[]): number | null {
+  if (proposedMinor === null) return null;
+  return ceilingMinor(proposedMinor, strictCeilingsMinor.includes(proposedMinor));
 }
 
 /**
@@ -672,6 +716,7 @@ export function extractFacts(intent: string, now: Date, tzOffsetMinutes: number)
     languages: languages.languages,
     words: words.words,
     budgetMinor: budget.minor,
+    strictCeilingsMinor: readStrictCeilings(p.lower),
     deadline: deadline ? { at: deadline.at, exact: deadline.exact } : null,
     revisions: revisions.revisions,
     subject: subject.subject,

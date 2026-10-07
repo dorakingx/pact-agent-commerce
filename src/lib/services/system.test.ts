@@ -6,7 +6,7 @@
  */
 import { readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ReconciliationView, WalletStatus } from "@/lib/api/dto";
 import { APP_VERSION } from "@/lib/config";
 import { closeDb, createTestDb, type Db, type DealGraph } from "@/lib/db";
@@ -149,17 +149,25 @@ describe("getSystemStatus without a reachable database", () => {
 describe("getSystemStatus on a database that forgets", () => {
   let db: Db;
 
-  beforeEach(async () => {
+  // One in-memory database serves both tests (neither writes to it). Building the first one
+  // migrates from scratch, which under a fully parallel unit run can outlast the default 10 s hook timeout.
+  beforeAll(async () => {
+    db = await createTestDb();
+  }, 60_000);
+
+  afterAll(async () => {
+    await closeDb(db);
+  });
+
+  beforeEach(() => {
     vi.stubEnv("PACT_LOG_SILENT", "1");
     for (const name of ["PAYPAL_CLIENT_ID", "PAYPAL_CLIENT_SECRET", "PAYPAL_WEBHOOK_ID", "PAYPAL_API_BASE", "PACT_PAYMENT_MODE", "DATABASE_URL", "POSTGRES_URL", "PGLITE_DIR"]) {
       vi.stubEnv(name, "");
     }
-    db = await createTestDb();
   });
 
-  afterEach(async () => {
+  afterEach(() => {
     vi.unstubAllEnvs();
-    await closeDb(db);
   });
 
   it("is healthy for keyless development and the end-to-end tests: simulated payments lose nothing real", async () => {

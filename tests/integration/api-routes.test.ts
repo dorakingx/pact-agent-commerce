@@ -312,7 +312,8 @@ describe("request hygiene", () => {
     expect(reply.status).toBe(201);
     const deal = dealOf(reply);
     expect(deal).toMatchObject({ status: "negotiating", isOwner: true, seller: { id: "northwind" }, payment: null, contract: null });
-    expect(deal.mandate?.budgetMinor).toBe(5000);
+    // The scenario's own "under $50", never the browser's figure.
+    expect(deal.mandate?.budgetMinor).toBe(4999);
 
     const advanced = await advance(deal.id, { body: { status: "verified", executed: "capture", amountMinor: 1 } });
     expect(advanced.json).toMatchObject({ executed: "negotiate", deal: { status: "negotiating" } });

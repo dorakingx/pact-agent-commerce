@@ -19,7 +19,11 @@ import { degradedChecks, evaluateAiRulesAi, evaluateAiRulesHeuristic } from "./v
 
 // The language heuristic belongs to the domain layer. A scripted stand-in keeps these tests about
 // what the verifier DOES with a reading; one test below runs against the real implementation.
-vi.mock("../domain/verification", () => ({ detectLanguage: vi.fn(), countWords: vi.fn() }));
+vi.mock("../domain/verification", async (importOriginal) => {
+  // How duplicate results collapse is the domain's rule, not a reading to script: it stays real.
+  const { moreConservative } = await importOriginal<typeof import("../domain/verification")>();
+  return { detectLanguage: vi.fn(), countWords: vi.fn(), moreConservative };
+});
 
 const JAPANESE = "新しいエスプレッソマシンは、毎朝の一杯を特別なものにします。";
 const ENGLISH = "The new espresso machine turns every morning cup into something special.";
@@ -110,7 +114,7 @@ describe("evaluateAiRulesAi: post-processing", () => {
     expect(checks[0].artifactIds).toHaveLength(4);
   });
 
-  it("drops results for rule ids the contract does not contain and keeps the first of duplicates", async () => {
+  it("drops results for rule ids the contract does not contain and keeps a failure over a later pass", async () => {
     const stub = stubCall(
       modelOutput([
         verdict("R99", { result: "pass" }),
@@ -121,6 +125,25 @@ describe("evaluateAiRulesAi: post-processing", () => {
     const { checks } = await evaluateAiRulesAi(illustrationCtx(), { ...stub, rasterize });
     expect(checks).toHaveLength(1);
     expect(checks[0]).toMatchObject({ ruleId: "R5", result: "fail", confidence: 0.8 });
+  });
+
+  it("keeps the result worse for the seller when the model answers a rule twice, whatever the order", async () => {
+    const unrelated = "#2 (16:9) is an unrelated mountain landscape.";
+    const passThenFail = stubCall(
+      modelOutput([verdict("R5", { result: "pass", confidence: 0.95 }), verdict("R5", { result: "fail", confidence: 0.95, evidence: unrelated })]),
+    );
+    const failed = await evaluateAiRulesAi(illustrationCtx(), { ...passThenFail, rasterize });
+    expect(failed.checks).toHaveLength(1);
+    expect(failed.checks[0]).toMatchObject({ ruleId: "R5", result: "fail", evidence: unrelated });
+
+    const passThenUnsure = stubCall(modelOutput([verdict("R5", { result: "pass" }), verdict("R5", { result: "uncertain", confidence: 0.6 })]));
+    expect((await evaluateAiRulesAi(illustrationCtx(), { ...passThenUnsure, rasterize })).checks[0]).toMatchObject({ result: "uncertain" });
+
+    // Same result twice: the confident failure, and the least confident pass.
+    const twoFails = stubCall(modelOutput([verdict("R5", { result: "fail", confidence: 0.6 }), verdict("R5", { result: "fail", confidence: 0.9 })]));
+    expect((await evaluateAiRulesAi(illustrationCtx(), { ...twoFails, rasterize })).checks[0]).toMatchObject({ result: "fail", confidence: 0.9 });
+    const twoPasses = stubCall(modelOutput([verdict("R5", { result: "pass", confidence: 0.9 }), verdict("R5", { result: "pass", confidence: 0.7 })]));
+    expect((await evaluateAiRulesAi(illustrationCtx(), { ...twoPasses, rasterize })).checks[0]).toMatchObject({ result: "pass", confidence: 0.7 });
   });
 
   it.each([

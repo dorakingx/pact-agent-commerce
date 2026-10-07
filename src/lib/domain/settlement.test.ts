@@ -462,5 +462,7 @@ describe("capture and void are mutually exclusive", () => {
     // the eligible report with any of the 4 decisions, or the review report with either release.
     expect(captures).toBe(6);
     expect(voids).toBeGreaterThan(10);
-  });
+    // Thousands of expect() calls: well under a second alone, but slower than the default 5 s
+    // when the whole suite runs in parallel on a busy machine.
+  }, 30_000);
 });

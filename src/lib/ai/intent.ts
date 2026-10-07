@@ -37,7 +37,7 @@ import {
   normaliseTzOffset,
   settleDeadline,
 } from "./intent-deadline";
-import { extractFacts, MAX_INTENT_CHARS, type IntentFacts, type WorkType } from "./intent-extract";
+import { extractFacts, MAX_INTENT_CHARS, strictModelBudgetMinor, type IntentFacts, type WorkType } from "./intent-extract";
 import { cleanLine, dataBlock, parseInstant, type AgentDeps } from "./shared";
 
 /* -------------------------------------------------------------------------- */
@@ -352,7 +352,8 @@ function draftFromModel(output: IntentOutput, facts: IntentFacts, tz: number): I
     maxWords: facts.words?.max ?? output.maxWords,
     subject: cleanLine(output.subject, 200).length >= 3 ? output.subject : facts.subject,
     styleOrTone: output.styleOrTone ?? facts.styleOrTone,
-    budgetMinor: mergedBudgetMinor(facts.budgetMinor, modelBudgetMinor(output.budgetUsd)),
+    // The model reports the figure the human named; "under" that figure excludes it, as in the pattern reading.
+    budgetMinor: mergedBudgetMinor(facts.budgetMinor, strictModelBudgetMinor(modelBudgetMinor(output.budgetUsd), facts.strictCeilingsMinor)),
     // An unambiguous phrase is resolved by arithmetic; anything looser is the model's call, with
     // the pattern-based reading as the backstop when the model offers nothing usable.
     deadline: (facts.deadline?.exact ? facts.deadline.at : null) ?? parseInstant(output.deadlineIso, tz) ?? facts.deadline?.at ?? null,

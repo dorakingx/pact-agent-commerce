@@ -419,8 +419,11 @@ function clampConfidence(confidence: number): number {
   return Number.isFinite(confidence) ? Math.min(1, Math.max(0, confidence)) : 0;
 }
 
-/** When two checks claim the same rule, keep the one that is worse for the seller. */
-function moreConservative(a: VerificationCheck, b: VerificationCheck): VerificationCheck {
+/**
+ * When two checks claim the same rule, keep the one that is worse for the seller. Shared with the
+ * AI verifier, which collapses a model's duplicate answers for one rule by the same principle.
+ */
+export function moreConservative(a: VerificationCheck, b: VerificationCheck): VerificationCheck {
   if (SEVERITY[a.result] !== SEVERITY[b.result]) return SEVERITY[a.result] > SEVERITY[b.result] ? a : b;
   // Same result: the confident failure, or the least confident pass / uncertain.
   const preferHigher = a.result === "fail";
