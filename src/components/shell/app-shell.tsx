@@ -10,7 +10,7 @@ export interface AppShellProps {
    * `full`: no container; the page lays out its own full-bleed sections (landing, dashboards).
    */
   width?: "page" | "full";
-  /** Forwarded to the header. See `AppHeaderProps.statusSlot`. */
+  /** Replaces the header's live system status. Leave unset to get `<LiveSystemStatus>` on every page. */
   statusSlot?: React.ReactNode;
   /** Hide the footer on app screens that manage the full viewport height. */
   hideFooter?: boolean;

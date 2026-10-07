@@ -2,6 +2,7 @@ export { AppFooter } from "./app-footer";
 export { AppHeader, type AppHeaderProps } from "./app-header";
 export { AppShell, type AppShellProps } from "./app-shell";
 export { GitHubIcon } from "./github-icon";
+export { LiveSystemStatus, type LiveSystemStatusProps } from "./live-system-status";
 export { MobileNav, type MobileNavProps } from "./mobile-nav";
 export { GITHUB_URL, LICENSE_URL, MAIN_CONTENT_ID, NAV_ITEMS, isActivePath, type NavItem } from "./nav";
 export { NavLinks } from "./nav-links";

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { PactLogo } from "@/components/brand/logo";
 import { cn } from "@/components/ui/cn";
 import { GITHUB_URL, LICENSE_URL } from "./nav";
@@ -17,7 +18,10 @@ export function AppFooter({ className }: { className?: string }) {
             <p>PACT uses PayPal authorization and capture; it is not an escrow service.</p>
           </div>
         </div>
-        <nav aria-label="Footer" className="flex items-center gap-5 text-sm">
+        <nav aria-label="Footer" className="flex flex-wrap items-center gap-x-5 gap-y-1 text-sm">
+          <Link href="/how-it-works" className={LINK}>
+            How it works
+          </Link>
           <a href={LICENSE_URL} target="_blank" rel="noopener noreferrer" className={LINK}>
             MIT License
           </a>

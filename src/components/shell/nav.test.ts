@@ -19,8 +19,9 @@ describe("isActivePath", () => {
 });
 
 describe("NAV_ITEMS", () => {
-  it("lists the three product areas with absolute, unique paths", () => {
-    expect(NAV_ITEMS.map((item) => item.href)).toEqual(["/workspace", "/operations", "/policies"]);
+  it("lists the product areas, then the explainer, with absolute, unique paths", () => {
+    expect(NAV_ITEMS.map((item) => item.href)).toEqual(["/workspace", "/operations", "/policies", "/how-it-works"]);
+    expect(new Set(NAV_ITEMS.map((item) => item.href)).size).toBe(NAV_ITEMS.length);
     expect(NAV_ITEMS.every((item) => item.label.length > 0)).toBe(true);
   });
 });

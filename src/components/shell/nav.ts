@@ -8,6 +8,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
   { href: "/workspace", label: "Workspace" },
   { href: "/operations", label: "Operations" },
   { href: "/policies", label: "Policies" },
+  { href: "/how-it-works", label: "How it works" },
 ];
 
 export const GITHUB_URL = "https://github.com/dorakingx/pact-agent-commerce";

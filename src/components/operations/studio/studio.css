@@ -1,0 +1,29 @@
+/*
+ * The few rules AG Studio's theme parameters cannot express. Everything else about how Studio
+ * looks is set through the theming API (theme.ts). Selectors target single Studio class names,
+ * the form AG documents as least likely to change between releases.
+ */
+
+/*
+ * The chat panel has no slot for an introduction, but it does draw the prompt starters only in
+ * a conversation nobody has spoken in yet — exactly when an introduction belongs. The text
+ * comes from the dashboard (a custom property set on the wrapper), so it is written once.
+ */
+.pact-studio .ag-studio-ai-prompt-starters::before {
+  content: var(--pact-agent-intro);
+  display: block;
+  padding: 0 2px 8px;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+
+/* Starters are sentences, not labels: let them wrap instead of cutting them off mid-question. */
+.pact-studio .ag-studio-ai-prompt-starter-label {
+  white-space: normal;
+}
+
+/* A custom widget fills the body Studio gives it, so its own scrolling and empty states can use the height. */
+.pact-studio .ag-studio-widget-container {
+  height: 100%;
+}
