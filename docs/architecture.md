@@ -172,10 +172,12 @@ Payments have their own machine: `none → created → approved → authorized �
 
 ## How a step executes
 
-The browser drives progress by calling `POST /api/deals/{id}/advance`. Each call executes **at most
-one** step:
+The browser drives progress by calling `POST /api/deals/{id}/advance`. Once funds are held, a
+scheduled sweep (`GET /api/cron/sweep`, authenticated with `CRON_SECRET`) can also advance a deal,
+so settlement never depends on the payer keeping a tab open. Each call executes **at most one**
+step:
 
-1. Check the session owns the deal.
+1. Check the caller owns the deal (or is the sweep).
 2. Take a per-deal lease in the database. If another request holds it, return `busy` — a double
    click, a second tab or a refresh can never run the same step twice.
 3. Do the external work for this step (a model call or a PayPal call).
@@ -220,6 +222,10 @@ the buyer agent can authorize **in-policy** deals without a PayPal login; anythi
 autonomous limit still pauses for approval inside PACT. PayPal vault tokens carry no spending cap
 of their own — the cap is PACT's policy engine, which is deterministic and sits outside the model.
 
+The shared demo wallet that the public deployment uses has an extra operator cap ($250 per order,
+$2,500 per day across all visitors). Above it, or if PayPal refuses the vault token, the deal falls
+back to asking the payer to approve in PayPal; a token PayPal rejects for good is removed.
+
 Without a connected wallet, the payer approves each order in PayPal (redirect flow).
 
 ## Persistence
@@ -233,12 +239,12 @@ needs no external services.
 | `deals` | Aggregate root: status, mandate, agreed terms, policy evaluation, lease |
 | `negotiation_moves` | Every validated move with guardrail notes and the model that produced it |
 | `contracts` | The signed contract document and its terms hash |
-| `payments` | PayPal order, authorization and capture ids; authorized and captured amounts |
+| `payments` | PayPal order, authorization and capture ids; authorized and captured amounts; which wallet paid |
 | `payment_operations` | Idempotency ledger, keyed by the `PayPal-Request-Id` |
 | `submissions`, `verification_reports` | Deliveries and per-rule verification evidence |
 | `audit_events` | Hash-chained audit trail |
 | `policies`, `wallets` | Spending policy and delegated wallet per session |
-| `webhook_events` | Verified PayPal webhooks, deduplicated on event id |
+| `webhook_events` | Verified PayPal webhooks (only the fields PACT reads, no payer details), deduplicated on event id |
 | `rate_limits` | Fixed-window counters that protect the public demo |
 | `simulated_orders` | State of the payment simulator (keyless development and CI only) |
 
@@ -248,5 +254,5 @@ needs no external services.
 |---|---|
 | Model slow or unavailable during negotiation or delivery | Hard timeout, gateway fallback to a second model, then a scripted agent. The deal is labelled as degraded. |
 | Model unavailable during verification | AI rules become `uncertain` → human review. Never auto-capture. |
-| PayPal 5xx / timeout | Retried with the same idempotency key; the step stays where it is and can be retried, up to four attempts per operation. After that an order or void ends the deal as failed; a capture whose outcome is unknown is only written off if the hold can be voided, so a deal is never marked failed while its payment went through. |
+| PayPal 5xx / timeout | Retried with the same idempotency key; the step stays where it is. An unreadable success is treated as "outcome unknown" and read back from PayPal, never as a refusal. A void is retried until it succeeds. A delegated order with no answer is retried with the same key for up to five hours (PayPal keeps the key for six), then closed with an audit note that an order may exist at PayPal. An interactive order gives up after four attempts. A capture whose outcome is unknown is only written off if the hold can be voided, so a deal is never marked failed while its payment went through. |
 | No PayPal credentials (keyless local dev, CI) | A simulator stands in for PayPal and every payment is labelled "simulated". |

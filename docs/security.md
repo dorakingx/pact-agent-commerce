@@ -108,8 +108,11 @@ itself (claims a 1:1 file that is not 1:1).
   `*.paypal.com`; PayPal's verification API is the fallback.
 - Stale transmissions are rejected.
 - Unverified events change nothing.
-- A verified event still has to match the ids and amounts PACT already holds; mismatches are logged
-  to the audit trail and ignored.
+- A verified event still has to match the ids and amounts PACT already holds — or, for an order
+  whose creation PACT never heard back about, the contract binding (`invoice_id` is the contract id,
+  `custom_id` carries its terms hash). Mismatches are logged to the audit trail and ignored.
+- Verification calls to PayPal are budgeted per deployment and failed certificate URLs are cached,
+  so a flood of forged deliveries cannot be turned into unbounded outbound traffic.
 - Webhooks confirm what PayPal did and can close a deal accordingly (for example, when PayPal
   releases an authorization the deal expires). They never initiate a capture: that happens only in
   the orchestrator, after the guard passes.
