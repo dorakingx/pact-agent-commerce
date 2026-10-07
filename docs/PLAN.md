@@ -62,3 +62,4 @@ These cannot be done by an agent and are tracked in `docs/devpost-submission.md`
   review (31 confirmed findings, all fixed); E2E suite. Neon Postgres and PayPal Sandbox (US app, Vault,
   verified webhooks, shared demo wallet) live in production; all four scenarios verified against the
   real Sandbox; 8 showcase deals seeded; screenshots and demo video recorded from production.
+- 2026-10-07 — Submitted to Devpost: https://devpost.com/software/pact-208alp (editable until 12 Nov 2026).

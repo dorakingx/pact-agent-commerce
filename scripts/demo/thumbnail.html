@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>PACT thumbnail</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@500&display=swap" rel="stylesheet" />
+<style>
+  :root { --ink:#0B1220; --ink2:#111A2B; --line:#22304A; --paper:#F2F4F7; --slate:#9AA4B2; --emerald:#34D399; --amber:#FBBF24; --red:#F87171; --violet:#C4B5FD; }
+  * { box-sizing:border-box; margin:0; }
+  html,body { width:1500px; height:1000px; }
+  body { background: radial-gradient(1100px 600px at 82% 8%, rgba(52,211,153,.13), transparent 60%), var(--ink); color:var(--paper); font-family:Geist, system-ui, sans-serif; padding:84px 96px; position:relative; overflow:hidden; }
+  .grid { position:absolute; inset:0; background-image:linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px); background-size:48px 48px; mask-image:linear-gradient(180deg, transparent, #000 30%, #000 70%, transparent); }
+  .brand { display:flex; align-items:center; gap:22px; position:relative; }
+  .brand svg { width:84px; height:84px; }
+  .word { font-size:84px; font-weight:700; letter-spacing:-.045em; line-height:1; }
+  .expand { font:500 21px/1 "Geist Mono", monospace; color:var(--slate); letter-spacing:.06em; margin-top:10px; text-transform:uppercase; }
+  h1 { position:relative; margin-top:58px; font-size:60px; line-height:1.08; font-weight:650; letter-spacing:-.03em; max-width:1180px; }
+  h1 em { font-style:normal; color:var(--emerald); }
+  .rail { position:relative; margin-top:64px; display:flex; align-items:center; }
+  .step { display:flex; flex-direction:column; align-items:center; gap:14px; width:200px; }
+  .dot { width:62px; height:62px; border-radius:50%; border:2px solid var(--line); background:var(--ink2); display:grid; place-items:center; font:600 22px Geist; color:var(--slate); }
+  .lbl { font-size:22px; font-weight:600; color:var(--paper); }
+  .sub { font-size:17px; color:var(--slate); margin-top:-8px; }
+  .hold .dot { border-color:var(--amber); color:var(--amber); background:rgba(251,191,36,.08); }
+  .hold .lbl { color:var(--amber); }
+  .cap .dot { border-color:var(--emerald); background:var(--emerald); color:var(--ink); }
+  .cap .lbl { color:var(--emerald); }
+  .bar { flex:1; height:2px; background:var(--line); margin-bottom:58px; min-width:20px; }
+  .fail { position:relative; margin:30px 0 0 610px; display:inline-flex; gap:14px; align-items:center; font-size:19px; color:var(--slate); border:1.5px dashed rgba(248,113,113,.55); border-radius:999px; padding:12px 22px; }
+  .fail b { color:var(--red); font-weight:600; }
+  .fail i { font-style:normal; color:var(--violet); }
+  .foot { position:absolute; left:96px; right:96px; bottom:70px; display:flex; gap:10px; flex-wrap:nowrap; }
+  .chip { font:500 16px/1 "Geist Mono", monospace; color:#CBD5E1; border:1px solid var(--line); background:rgba(17,26,43,.8); border-radius:999px; padding:11px 15px; }
+  .chip b { color:var(--emerald); font-weight:500; }
+</style>
+</head>
+<body>
+  <div class="grid"></div>
+  <div class="brand">
+    <svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M11.5 3.5H8A4.5 4.5 0 0 0 3.5 8v8A4.5 4.5 0 0 0 8 20.5" stroke="#F2F4F7"/>
+      <path d="M12.5 20.5H16a4.5 4.5 0 0 0 4.5-4.5V8A4.5 4.5 0 0 0 16 3.5" stroke="#F2F4F7"/>
+      <path d="M8.6 12.3l2.4 2.4 4.5-5.1" stroke="#34D399"/>
+    </svg>
+    <div>
+      <div class="word">PACT</div>
+      <div class="expand">Programmable Agent Commerce Trust</div>
+    </div>
+  </div>
+
+  <h1>AI agents can negotiate.<br/>PACT makes sure they only get paid <em>when the deal is done.</em></h1>
+
+  <div class="rail">
+    <div class="step"><div class="dot">1</div><div class="lbl">Negotiate</div><div class="sub">buyer × seller agents</div></div>
+    <div class="bar"></div>
+    <div class="step"><div class="dot">2</div><div class="lbl">Contract</div><div class="sub">hashed terms</div></div>
+    <div class="bar"></div>
+    <div class="step hold"><div class="dot">3</div><div class="lbl">PayPal authorize</div><div class="sub">funds held</div></div>
+    <div class="bar"></div>
+    <div class="step"><div class="dot">4</div><div class="lbl">AI verify</div><div class="sub">evidence per condition</div></div>
+    <div class="bar"></div>
+    <div class="step cap"><div class="dot">✓</div><div class="lbl">Capture</div><div class="sub">only if verified</div></div>
+  </div>
+  <div class="fail"><b>Fails verification</b> → no capture → <i>revise · human review · void</i></div>
+
+  <div class="foot">
+    <span class="chip"><b>PayPal</b> Orders v2 AUTHORIZE · Payments v2 · Vault · Webhooks</span>
+    <span class="chip"><b>AI</b> Gemini 2.5 Flash × GPT-5 mini</span>
+    <span class="chip"><b>AG</b> Studio · Grid · Charts</span>
+  </div>
+</body>
+</html>

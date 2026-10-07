@@ -3,8 +3,8 @@
 Copy-paste source for every field of the PayPal AI Hackathon submission form
 (<https://paypalaihackathon.devpost.com/>). Deadline: **12 November 2026, 12:00 PT**.
 
-Fields marked **USER CONFIRMATION REQUIRED** are personal, legal or account-bound and must be
-filled in by the project owner. Nothing in this file has been submitted.
+**Submitted on 7 October 2026:** https://devpost.com/software/pact-208alp (editable until the
+deadline). Personal, legal and eligibility fields were entered by the project owner.
 
 ---
 
@@ -328,5 +328,5 @@ https://pact-agent-commerce.vercel.app
 - [x] Demo video public on YouTube: https://youtu.be/uacRihJmobY
 - [x] AG Studio licence: decided by the owner to run without a key; the dashboard runs in AG Studio's trial mode (watermark, labelled "AG Studio trial mode" in the header)
 - [x] Repository is public and GitHub shows the MIT licence in "About"
-- [ ] Re-check every statement above against the product right before submitting
-- [ ] Project owner has reviewed this document and approved the submission
+- [x] Statements checked against the product
+- [x] Project owner approved; submitted 7 Oct 2026
